@@ -1,17 +1,19 @@
 import streamlit as st
 from ui.stock_tab import render_stock_tab
 from ui.ai_tab import render_ai_tab
-from ui.improved_news_tab import render_stock_news_tab
+from ui.news_tab import render_stock_news_tab
 from ui.bist100_tab import render_bist100_tab
 from ui.ml_tab import render_ml_prediction_tab
 from ui.ml_prediction_tab import render_ml_prediction_tab as render_ml_scan_tab
 from ui.analysis_history_tab import render_analysis_history_tab
 from ui.portfolio_tab import render_portfolio_tab
-from ui.dashboard_tab import render_dashboard_tab
+from ui.technical_screener_tab import render_technical_screener_tab
+from ui.enhanced_stock_screener_tab import render_enhanced_stock_screener_tab
+from ui.stock_profiler_ui import render_stock_profiler_tab
 from data.db_utils import DB_FILE, get_analysis_results
 from data.stock_data import get_market_summary, get_popular_stocks
 from data.announcements import get_announcements
-from data.utils import get_analysis_result, save_analysis_result, get_all_announcements, add_announcement, delete_announcement
+from data.utils import get_analysis_result, save_analysis_result, get_favorites
 import time
 import logging
 import pandas as pd
@@ -424,12 +426,11 @@ def main():
                     if st.button("🔍", key=f"analyze_{stock_symbol}", help="Hisseyi analiz et"):
                         # Analiz sekmesine yönlendir ve bu hisseyi analiz et
                         st.session_state.selected_stock_for_analysis = stock_symbol
-                        st.experimental_rerun()
+                        st.info(f"{stock_symbol} analizi için Hisse Analizi sekmesine gidin.")
                 with col2:
                     if st.button("❌", key=f"remove_{stock_symbol}", help="Favorilerden çıkar"):
                         if remove_from_favorites(stock_symbol):
                             st.success(f"{stock_symbol} favorilerden çıkarıldı.")
-                            st.experimental_rerun()
                         else:
                             st.error("Hisse çıkarılırken bir hata oluştu.")
         
@@ -439,67 +440,40 @@ def main():
     col1, col2 = st.columns([7, 3])
     
     with col1:
-        tabs = st.tabs([
-            "Dashboard", 
-            "Hisse Analizi", 
-            "BIST100 Genel Bakış", 
-            "Yapay Zeka", 
-            "ML Tahminleri", 
-            "ML Tarama", 
-            "Portföy", 
-            "Analiz Geçmişi", 
-            "Haberler"
-        ])
+        tabs = st.tabs(["🔍 Hisse Analizi", "📊 BIST100 Genel Bakış", "🧠 Yapay Zeka", "📈 ML Tahminleri", "🔎 ML Tarama", "🎯 Hisse Profilleri", "🔎 Teknik Tarama", "🚀 Gelişmiş Tarayıcı", "📝 Analiz Geçmişi", "📰 Haberler", "💼 Portföy"])
         
-        # 1. Dashboard Sekmesi
         with tabs[0]:
-            try:
-                # Aktif kullanıcı adını al (eğer oturum açılmışsa)
-                username = st.session_state.get('username', None)
-                render_dashboard_tab(username)
-            except Exception as e:
-                st.error(f"Dashboard sekmesi yüklenirken bir hata oluştu: {str(e)}")
-                st.code(f"{type(e).__name__}: {str(e)}")
-                logger.error(f"Dashboard sekmesi renderlanırken hata: {str(e)}")
-                logger.error(traceback.format_exc())
+            render_stock_tab()
         
-        # 2. Hisse Analizi Sekmesi
         with tabs[1]:
-            try:
-                render_stock_tab()
-            except Exception as e:
-                st.error(f"Hisse analizi sekmesi yüklenirken bir hata oluştu: {str(e)}")
-                st.code(f"{type(e).__name__}: {str(e)}")
-                logger.error(f"Hisse analizi sekmesi renderlanırken hata: {str(e)}")
-                logger.error(traceback.format_exc())
+            render_bist100_tab()
         
-        # 3. BIST100 Genel Bakış Sekmesi
         with tabs[2]:
-            try:
-                render_bist100_tab()
-            except Exception as e:
-                st.error(f"BIST100 genel bakış sekmesi yüklenirken bir hata oluştu: {str(e)}")
-                st.code(f"{type(e).__name__}: {str(e)}")
-                logger.error(f"BIST100 genel bakış sekmesi renderlanırken hata: {str(e)}")
-                logger.error(traceback.format_exc())
-        
-        with tabs[3]:
             render_ai_tab()
         
-        with tabs[4]:
+        with tabs[3]:
             render_ml_prediction_tab()
         
-        with tabs[5]:
+        with tabs[4]:
             render_ml_scan_tab()
         
+        with tabs[5]:
+            render_stock_profiler_tab()
+        
         with tabs[6]:
-            render_portfolio_tab()
+            render_technical_screener_tab()
         
         with tabs[7]:
-            render_analysis_history_tab()
+            render_enhanced_stock_screener_tab()
         
         with tabs[8]:
+            render_analysis_history_tab()
+        
+        with tabs[9]:
             render_stock_news_tab()
+        
+        with tabs[10]:
+            render_portfolio_tab()
     
     with col2:
         # Piyasa Güncellemeleri kartı - Sade tasarım
@@ -591,7 +565,7 @@ def main():
                 with col2:
                     if st.button("🔄", key=f"reanalyze_{stock}_{analysis_id}", help="Yeniden analiz et"):
                         st.session_state.selected_stock_for_analysis = stock
-                        st.experimental_rerun()
+                        st.info(f"{stock} yeniden analizi için Hisse Analizi sekmesine gidin.")
                 
                 st.markdown("<hr style='margin: 0.3rem 0; border-color: #eee;'>", unsafe_allow_html=True)
         else:

@@ -20,7 +20,7 @@ echo Uygulama baslatiliyor...
 echo.
 
 REM Uygulamayı başlat
-streamlit run main.py
+streamlit run borsa.py
 
 REM Hata durumunda bekle
 if %ERRORLEVEL% neq 0 (

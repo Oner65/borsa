@@ -15,6 +15,7 @@ import logging
 import json
 from datetime import datetime
 import random
+import re
 
 # Gemini API entegrasyonu
 try:
@@ -24,7 +25,11 @@ except ImportError:
     GEMINI_IMPORTED = False
 
 # API Anahtarı ve model yükleme
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyANEpZjZCV9zYtUsMJ5BBgMzkrf8yu8kM8")  # Google Gemini API anahtarını buraya ekleyin
+try:
+    from config import API_KEYS
+    GEMINI_API_KEY = API_KEYS.get("GEMINI_API_KEY", "AIzaSyANEpZjZCV9zYtUsMJ5BBgMzkrf8yu8kM8")
+except (ImportError, AttributeError):
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyANEpZjZCV9zYtUsMJ5BBgMzkrf8yu8kM8")  # Google Gemini API anahtarı
 
 # Veri çekme fonksiyonunu ai/api.py içine taşıyalım (döngüsel import sorununu önlemek için)
 # veya data modülünden import edelim
@@ -53,10 +58,61 @@ logger = logging.getLogger(__name__)
 
 def initialize_gemini_api():
     """
-    Google Gemini API'yi başlatır (şu an için dummy bir değer döndürür)
+    Google Gemini API'yi başlatır ve model nesnesini döndürür
     """
-    logger.info("Gemini API başarıyla başlatıldı.")
-    return "dummy_gemini_model"  # Gerçek model yerine dummy değer döndür
+    try:
+        import google.generativeai as genai
+        from config import API_KEYS
+        
+        # API anahtarını config.py veya ortam değişkeninden al
+        GEMINI_API_KEY = API_KEYS.get("GEMINI_API_KEY")
+        if not GEMINI_API_KEY:
+            GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+            
+        if GEMINI_API_KEY:
+            # API anahtarını yapılandır ve model nesnesini döndür
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel('gemini-pro')
+            logger.info("Gemini API başarıyla başlatıldı.")
+            return model
+        else:
+            # API anahtarı bulunamadı, sahte nesne döndür
+            logger.warning("Gemini API anahtarı bulunamadı. Sahte model kullanılıyor.")
+            class DummyGeminiModel:
+                def generate_content(self, prompt, generation_config=None):
+                    class DummyResponse:
+                        @property
+                        def text(self):
+                            return json.dumps({
+                                "summary": "Bu analiz sahte model tarafından üretilmiştir.",
+                                "status": "nötr",
+                                "best_performer": "YOK",
+                                "best_percentage": 0,
+                                "worst_performer": "YOK", 
+                                "worst_percentage": 0,
+                                "recommendations": ["Gerçek API anahtarı ile yeniden deneyin."]
+                            })
+                    return DummyResponse()
+            return DummyGeminiModel()
+    except Exception as e:
+        logger.error(f"Gemini API başlatılırken hata: {str(e)}")
+        # Hata durumunda sahte nesne döndür
+        class DummyGeminiModel:
+            def generate_content(self, prompt, generation_config=None):
+                class DummyResponse:
+                    @property
+                    def text(self):
+                        return json.dumps({
+                            "summary": f"API hatası: {str(e)}",
+                            "status": "nötr",
+                            "best_performer": "YOK",
+                            "best_percentage": 0,
+                            "worst_performer": "YOK", 
+                            "worst_percentage": 0,
+                            "recommendations": ["API hatası: Teknik bir sorun oluştu."]
+                        })
+                return DummyResponse()
+        return DummyGeminiModel()
 
 def ai_market_sentiment(model, log_container=None):
     """
@@ -246,48 +302,46 @@ Sektörün büyüme potansiyeli, rekabet koşulları ve düzenleyici çerçeve y
     
     return sector_text, sector_data
 
-def ai_portfolio_recommendation(model, budget=10000):
+def ai_portfolio_recommendation(portfolio_data, market_trends=None):
     """
-    Portföy önerileri sunar
-    """
-    # Basit bir portföy önerisi metni
-    recommendation_text = f"""
-**{budget} TL için Portföy Önerisi**
-
-Dengeli bir yatırım stratejisi için aşağıdaki dağılım önerilebilir:
-
-1. Bankacılık Sektörü (%25):
-   - GARAN: Güçlü finansallar ve temettü potansiyeli
-   - AKBNK: Güçlü sermaye yapısı
-
-2. Savunma Sanayi (%20):
-   - ASELS: Sektör lideri, ihracat potansiyeli yüksek
-
-3. Holding (%15):
-   - KCHOL: Çeşitlendirilmiş portföy yapısı, istikrarlı büyüme
-
-4. Perakende (%15):
-   - BIMAS: Sektör lideri, operasyonel verimlilik yüksek
-
-5. Demir-Çelik (%10):
-   - EREGL: Değerleme avantajı, güçlü ihracat performansı
-
-6. Enerji (%10):
-   - TUPRS: Güçlü finansallar, yeni yatırımlar
-
-7. Havacılık (%5):
-   - THYAO: Sektör lideri, yolcu sayısında iyileşme
-
-**Yatırım Stratejisi:**
-- Orta ve uzun vadeli yatırım yaklaşımı
-- Düzenli takip ve gerektiğinde rebalancing (yeniden dengeleme)
-- Temettü potansiyeli yüksek hisselere odaklanma
-
-**Uyarı:** Bu öneri kişisel risk profilinize ve yatırım hedeflerinize göre değişiklik gösterebilir.
-Yatırım kararları için profesyonel danışmanlık hizmeti almanız önerilir.
-"""
+    Yapay zeka kullanarak portföy önerileri oluşturur
     
-    return recommendation_text
+    Args:
+        portfolio_data (dict): Portföy verileri
+        market_trends (dict, optional): Piyasa trendleri
+    
+    Returns:
+        dict: Analiz önerileri (artık string değil, dictionary döndürür)
+    """
+    try:
+        # Bu fonksiyon yerine ai_portfolio_analysis kullanılmalı
+        # Geriye uyumluluk için tutuyoruz
+        result = ai_portfolio_analysis(portfolio_data, market_data=market_trends)
+        
+        # Sonuç her zaman dictionary olacak şekilde garanti et
+        if isinstance(result, str):
+            # Eğer string döndüyse, onu dictionary içine yerleştir
+            return {
+                "status": "nötr",
+                "summary": result,
+                "best_performer": "",
+                "best_percentage": 0,
+                "worst_performer": "",
+                "worst_percentage": 0,
+                "recommendations": ["Analiz metin formatında alındı."]
+            }
+        return result
+    except Exception as e:
+        logging.error(f"Portfolyo önerisi oluşturulurken hata: {str(e)}")
+        return {
+            "status": "nötr",
+            "summary": f"Öneri oluşturulurken bir hata oluştu: {str(e)}",
+            "best_performer": "",
+            "best_percentage": 0,
+            "worst_performer": "",
+            "worst_percentage": 0,
+            "recommendations": ["Teknik bir hata nedeniyle öneriler oluşturulamadı."]
+        }
 
 def ai_technical_interpretation(model, stock_symbol, stock_data):
     """
@@ -335,79 +389,147 @@ seviyeleri yakından takip edilmeli.
     
     return technical_text
 
-def ai_portfolio_analysis(model, portfolio_data):
+def ai_portfolio_analysis(portfolio_data, portfolio_history=None, market_data=None):
     """
-    Portföy analizini yapay zeka ile gerçekleştirir.
+    Yapay zeka kullanarak portföy analizi yapar
     
     Args:
-        model: Yapay zeka modeli
-        portfolio_data (dict): Portföy performans verileri
-        
+        portfolio_data (dict): Portföy verileri
+        portfolio_history (dict, optional): Portföy geçmişi (varsa)
+        market_data (dict, optional): Piyasa verileri (varsa)
+    
     Returns:
-        dict: Yapay zeka analiz sonuçları
+        dict: Analiz sonuçları
     """
-    # Portföy verilerini analiz et
-    stocks_data = portfolio_data.get("stocks", [])
-    total_gain_loss = portfolio_data.get("total_gain_loss", 0)
-    
-    # Kazançlı ve zarardaki hisseleri ayır
-    profitable_stocks = [s for s in stocks_data if s["gain_loss"] > 0]
-    loss_stocks = [s for s in stocks_data if s["gain_loss"] < 0]
-    
-    # En iyi ve en kötü performansa sahip hisseleri bul
-    best_stock = max(stocks_data, key=lambda x: x["gain_loss_percentage"]) if stocks_data else None
-    worst_stock = min(stocks_data, key=lambda x: x["gain_loss_percentage"]) if stocks_data else None
-    
-    # Genel durum belirle
-    if total_gain_loss > 0:
-        status = "pozitif"
-        advice = "Portföyünüz kazançta. Kâr realizasyonu yapabilir veya güçlü hisselerde pozisyonunuzu artırabilirsiniz."
-    elif total_gain_loss < 0:
-        status = "negatif"
-        advice = "Portföyünüz zararda. Zarardaki hisseleri gözden geçirin ve performansı iyi olan sektörlere yönelebilirsiniz."
-    else:
-        status = "nötr"
-        advice = "Portföyünüz başabaş durumda. Fırsatları değerlendirerek daha güçlü hisselere yönelebilirsiniz."
-    
-    # Sektörlere göre performans
-    sector_performance = {}
-    for stock in stocks_data:
-        sector = "Bilinmiyor"  # Varsayılan değer
-        for other_stock in stocks_data:
-            if other_stock.get("sector") and other_stock["symbol"] == stock["symbol"]:
-                sector = other_stock["sector"]
-                break
+    try:
+        gemini_pro = initialize_gemini_api()
+        if not gemini_pro:
+            return {"status": "nötr", "summary": "Yapay zeka modeli başlatılamadığı için analiz yapılamadı."}
         
-        if sector in sector_performance:
-            sector_performance[sector].append(stock["gain_loss_percentage"])
+        # Gelen veriyi metin haline getir (düzgün formatla)
+        portfolio_text = json.dumps(portfolio_data, indent=2, ensure_ascii=False) if isinstance(portfolio_data, dict) else str(portfolio_data)
+        
+        # Geçmiş varsa ekle
+        history_text = ""
+        if portfolio_history:
+            history_text = "\n\nPortföy Geçmişi:\n" + json.dumps(portfolio_history, indent=2, ensure_ascii=False)
+        
+        # Piyasa verisi varsa ekle
+        market_text = ""
+        if market_data:
+            market_text = "\n\nPiyasa Verileri:\n" + json.dumps(market_data, indent=2, ensure_ascii=False)
+        
+        # Cevap almak için prompt hazırla
+        prompt = f"""Aşağıdaki portföy verilerini analiz etmeni istiyorum:
+
+{portfolio_text}
+{history_text}
+{market_text}
+
+Lütfen aşağıdaki bilgileri içeren bir analiz yap:
+1. Portföyün genel durumuyla ilgili kısa bir özet
+2. Portföyün "pozitif", "negatif" veya "nötr" olarak durumu
+3. En iyi performans gösteren hisse
+4. En kötü performans gösteren hisse
+5. En iyi performans yüzdesini sayı olarak
+6. En kötü performans yüzdesini sayı olarak
+7. Portföy için öneriler listesi
+
+Yanıtını aşağıdaki JSON formatında ver:
+{{
+  "summary": "Portföy özeti...",
+  "status": "pozitif/negatif/nötr",
+  "best_performer": "En iyi hisse kodu",
+  "best_percentage": 12.5,
+  "worst_performer": "En kötü hisse kodu",
+  "worst_percentage": -5.2,
+  "recommendations": [
+    "Öneri 1",
+    "Öneri 2",
+    "Öneri 3"
+  ]
+}}
+
+Sadece JSON formatında yanıt ver, ilave açıklama ekleme.
+"""
+        
+        # Modele gönder
+        response = gemini_pro.generate_content(prompt, generation_config={"temperature": 0.2})
+        response_text = response.text.strip()
+        
+        # JSON yanıtını çıkart
+        json_pattern = r'^\s*({[\s\S]*})\s*$'
+        json_match = re.search(json_pattern, response_text)
+        
+        if json_match:
+            json_str = json_match.group(1)
+            try:
+                result = json.loads(json_str)
+                # Gerekli alanların tümü var mı kontrol et
+                required_fields = ["summary", "status", "best_performer", "worst_performer", 
+                                 "best_percentage", "worst_percentage", "recommendations"]
+                
+                for field in required_fields:
+                    if field not in result:
+                        # Eksik alanı varsayılan değerle ekle
+                        if field == "recommendations":
+                            result[field] = ["Daha fazla analiz için yeterli veri yok."]
+                        elif "percentage" in field:
+                            result[field] = 0.0
+                        elif "performer" in field:
+                            result[field] = "Belirsiz"
+                        elif field == "status":
+                            result[field] = "nötr"
+                        else:
+                            result[field] = "Bilgi mevcut değil"
+                
+                return result
+            except Exception as json_e:
+                logging.error(f"JSON çözümleme hatası: {str(json_e)}")
+                return {
+                    "status": "nötr",
+                    "summary": "Yapay zeka yanıtı işlenemedi. Lütfen daha sonra tekrar deneyin.",
+                    "best_performer": "",
+                    "best_percentage": 0,
+                    "worst_performer": "",
+                    "worst_percentage": 0,
+                    "recommendations": ["Yapay zeka analizi şu anda kullanılamıyor."]
+                }
         else:
-            sector_performance[sector] = [stock["gain_loss_percentage"]]
-    
-    # Sektör ortalamalarını hesapla
-    sector_averages = {}
-    for sector, performances in sector_performance.items():
-        sector_averages[sector] = sum(performances) / len(performances)
-    
-    # En iyi ve en kötü sektörler
-    best_sector = max(sector_averages.items(), key=lambda x: x[1]) if sector_averages else ("Bilinmiyor", 0)
-    worst_sector = min(sector_averages.items(), key=lambda x: x[1]) if sector_averages else ("Bilinmiyor", 0)
-    
-    # Analiz sonuçlarını oluştur
-    return {
-        "status": status,
-        "summary": f"Portföyünüzde {len(stocks_data)} adet hisse bulunuyor. {len(profitable_stocks)} tanesi kârda, {len(loss_stocks)} tanesi zararda.",
-        "best_performer": best_stock["symbol"] if best_stock else "Yok",
-        "worst_performer": worst_stock["symbol"] if worst_stock else "Yok",
-        "best_percentage": best_stock["gain_loss_percentage"] if best_stock else 0,
-        "worst_percentage": worst_stock["gain_loss_percentage"] if worst_stock else 0,
-        "best_sector": best_sector[0],
-        "worst_sector": worst_sector[0],
-        "best_sector_performance": best_sector[1],
-        "worst_sector_performance": worst_sector[1],
-        "recommendations": advice,
-        "details": "Bu analiz yapay zeka tarafından oluşturulmuştur. Yatırım kararlarınızı profesyonel danışmanlık almadan vermeyin.",
-        "date": datetime.now().strftime("%Y-%m-%d")
-    }
+            # JSON bulunamadıysa, metni olduğu gibi döndür
+            if response_text:
+                # Düz metni bir dict'e dönüştür
+                return {
+                    "status": "nötr",
+                    "summary": response_text,
+                    "best_performer": "",
+                    "best_percentage": 0,
+                    "worst_performer": "",
+                    "worst_percentage": 0,
+                    "recommendations": ["Analiz metin formatında alındı: " + response_text[:100] + "..."]
+                }
+            else:
+                return {
+                    "status": "nötr", 
+                    "summary": "Yapay zeka yanıt vermedi. Lütfen daha sonra tekrar deneyin.",
+                    "best_performer": "",
+                    "best_percentage": 0,
+                    "worst_performer": "",
+                    "worst_percentage": 0,
+                    "recommendations": ["Yapay zeka analizi şu anda kullanılamıyor."]
+                }
+    except Exception as e:
+        logging.error(f"Portföy analizi yapılırken hata: {str(e)}")
+        logging.error(traceback.format_exc())
+        return {
+            "status": "nötr",
+            "summary": f"Portföy analizi sırasında bir hata oluştu: {str(e)}",
+            "best_performer": "",
+            "best_percentage": 0,
+            "worst_performer": "",
+            "worst_percentage": 0,
+            "recommendations": ["Teknik bir hata nedeniyle analiz tamamlanamadı."]
+        }
 
 def ai_portfolio_optimization(model, portfolio_data, sector_distribution):
     """

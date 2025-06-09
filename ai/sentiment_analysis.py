@@ -1,250 +1,207 @@
-import re
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-import pickle
-import os
+import logging
+import requests
+from textblob import TextBlob
+import nltk
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import yfinance as yf
+from datetime import datetime, timedelta
+import pandas as pd
+
+# NLTK verilerini indir (sadece ilk çalıştırmada gerekli)
+try:
+    nltk.download('vader_lexicon', quiet=True)
+    nltk.download('punkt', quiet=True)
+except:
+    pass
 
 class SentimentAnalyzer:
-    """
-    Borsa haberleri ve finansal metinler için duyarlılık analizi yapan sınıf.
-    Scikit-learn kullanarak TF-IDF ve LinearSVC ile modeli oluşturur.
-    """
+    """Basit sentiment analizi sınıfı"""
     
-    def __init__(self, model_path=None):
-        """
-        Args:
-            model_path: Önceden eğitilmiş model dosyasının yolu
-        """
-        self.model_path = model_path or os.path.join(os.path.dirname(__file__), 'sentiment_model.pkl')
-        self.model = None
-        
-        # Eğer model dosyası varsa yükle
-        if os.path.exists(self.model_path):
-            try:
-                self.model = self._load_model()
-                print(f"Model başarıyla yüklendi: {self.model_path}")
-            except Exception as e:
-                print(f"Model yüklenirken hata oluştu: {e}")
-                self._create_model()
-        else:
-            self._create_model()
-    
-    def _create_model(self):
-        """Model pipeline'ını oluşturur"""
-        self.model = Pipeline([
-            ('vectorizer', TfidfVectorizer(
-                max_features=5000,
-                min_df=5,
-                max_df=0.8,
-                sublinear_tf=True,
-                use_idf=True,
-                ngram_range=(1, 2),
-                strip_accents='unicode'
-            )),
-            ('classifier', LinearSVC(
-                C=1,
-                loss='squared_hinge',
-                max_iter=1000
-            ))
-        ])
-    
-    def _preprocess_text(self, text):
-        """Metni ön işleme tabi tutar"""
-        if not isinstance(text, str):
-            return ""
-        
-        # Küçük harfe çevir
-        text = text.lower()
-        
-        # Özel karakterleri temizle
-        text = re.sub(r'[^\w\s]', '', text)
-        
-        # Fazla boşlukları temizle
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
-    
-    def train(self, texts, labels):
-        """
-        Modeli eğitir
-        
-        Args:
-            texts (list): Metin listesi
-            labels (list): Etiket listesi (1: pozitif, 0: negatif)
-        
-        Returns:
-            dict: Eğitim raporu
-        """
-        # Metinleri ön işleme
-        processed_texts = [self._preprocess_text(text) for text in texts]
-        
-        # Eğitim ve test veri setlerine ayır
-        X_train, X_test, y_train, y_test = train_test_split(
-            processed_texts, labels, test_size=0.2, random_state=42
-        )
-        
-        # Modeli eğit
-        self.model.fit(X_train, y_train)
-        
-        # Test et
-        y_pred = self.model.predict(X_test)
-        
-        # Rapor oluştur
-        report = classification_report(y_test, y_pred, output_dict=True)
-        
-        # Modeli kaydet
-        self._save_model()
-        
-        return report
-    
-    def predict(self, texts):
-        """
-        Metinlerin duyarlılığını tahmin eder
-        
-        Args:
-            texts (str or list): Tek bir metin veya metin listesi
-        
-        Returns:
-            list: Tahmin sonuçları (1: pozitif, 0: negatif)
-        """
-        if self.model is None:
-            raise ValueError("Model henüz eğitilmedi.")
-        
-        # Tek metin mi yoksa liste mi kontrol et
-        if isinstance(texts, str):
-            texts = [texts]
-        
-        # Metinleri ön işleme
-        processed_texts = [self._preprocess_text(text) for text in texts]
-        
-        # Tahmin yap
-        predictions = self.model.predict(processed_texts)
-        
-        return predictions
-    
-    def predict_proba(self, texts):
-        """
-        Metinlerin duyarlılık olasılıklarını tahmin eder
-        
-        Args:
-            texts (str or list): Tek bir metin veya metin listesi
-        
-        Returns:
-            list: Olasılık değerleri (-1 ile 1 arasında)
-        """
-        if self.model is None:
-            raise ValueError("Model henüz eğitilmedi.")
-        
-        # Tek metin mi yoksa liste mi kontrol et
-        if isinstance(texts, str):
-            texts = [texts]
-        
-        # Metinleri ön işleme
-        processed_texts = [self._preprocess_text(text) for text in texts]
-        
-        # Model tipine göre prob hesapla
-        if hasattr(self.model, 'predict_proba'):
-            # CalibratedClassifierCV için
-            probs = self.model.predict_proba(processed_texts)
-            # Pozitif sınıf olasılıklarını al (ikinci sütun) ve [-1, 1] aralığına dönüştür
-            confidences = 2 * probs[:, 1] - 1
-        else:
-            # LinearSVC için decision_function
-            decision_values = self.model.decision_function(processed_texts)
-            # Normalize et (-1 ile 1 arasında)
-            max_abs = np.max(np.abs(decision_values)) if len(decision_values) > 0 else 1
-            if max_abs > 0:
-                confidences = decision_values / max_abs
-            else:
-                confidences = decision_values
-        
-        return confidences
-    
-    def _save_model(self):
-        """Modeli dosyaya kaydeder"""
+    def __init__(self):
         try:
-            with open(self.model_path, 'wb') as f:
-                pickle.dump(self.model, f)
-            print(f"Model başarıyla kaydedildi: {self.model_path}")
+            self.vader_analyzer = SentimentIntensityAnalyzer()
+        except ImportError:
+            # Eğer vaderSentiment yüklenemezse, basit bir alternatif kullan
+            self.vader_analyzer = None
+        self.logger = logging.getLogger(__name__)
+    
+    def analyze_text(self, text):
+        """
+        Verilen metni analiz ederek sentiment skorunu döndürür
+        
+        Args:
+            text (str): Analiz edilecek metin
+            
+        Returns:
+            dict: Sentiment analizi sonuçları
+        """
+        if not text or not isinstance(text, str):
+            return {
+                'compound': 0.0,
+                'positive': 0.0,
+                'negative': 0.0,
+                'neutral': 1.0,
+                'label': 'neutral'
+            }
+        
+        try:
+            # VADER analizi
+            if self.vader_analyzer:
+                vader_scores = self.vader_analyzer.polarity_scores(text)
+            else:
+                # Basit yedek analiz
+                vader_scores = {'compound': 0.0, 'pos': 0.0, 'neg': 0.0, 'neu': 1.0}
+            
+            # TextBlob analizi (yedek olarak)
+            try:
+                blob = TextBlob(text)
+                textblob_sentiment = blob.sentiment.polarity
+            except:
+                textblob_sentiment = 0.0
+            
+            # Sonuçları birleştir
+            compound_score = (vader_scores['compound'] + textblob_sentiment) / 2
+            
+            # Label belirle
+            if compound_score >= 0.05:
+                label = 'positive'
+            elif compound_score <= -0.05:
+                label = 'negative'
+            else:
+                label = 'neutral'
+            
+            return {
+                'compound': compound_score,
+                'positive': vader_scores['pos'],
+                'negative': vader_scores['neg'],
+                'neutral': vader_scores['neu'],
+                'label': label,
+                'vader_compound': vader_scores['compound'],
+                'textblob_polarity': textblob_sentiment
+            }
+            
         except Exception as e:
-            print(f"Model kaydedilirken hata oluştu: {e}")
+            self.logger.error(f"Sentiment analizi hatası: {e}")
+            return {
+                'compound': 0.0,
+                'positive': 0.0,
+                'negative': 0.0,
+                'neutral': 1.0,
+                'label': 'neutral'
+            }
     
-    def _load_model(self):
-        """Modeli dosyadan yükler"""
-        with open(self.model_path, 'rb') as f:
-            return pickle.load(f)
+    def analyze_news_data(self, news_data):
+        """
+        Haber verilerini toplu olarak analiz eder
+        
+        Args:
+            news_data (list): Haber listesi
+            
+        Returns:
+            list: Sentiment skorları ile birlikte haber verileri
+        """
+        analyzed_data = []
+        
+        for news in news_data:
+            if isinstance(news, dict):
+                title = news.get('title', '')
+                description = news.get('description', '')
+                content = news.get('content', '')
+                
+                # Birleşik metin oluştur
+                combined_text = f"{title} {description} {content}".strip()
+                
+                # Sentiment analizi yap
+                sentiment = self.analyze_text(combined_text)
+                
+                # Orijinal veriyi kopyala ve sentiment ekle
+                analyzed_news = news.copy()
+                analyzed_news['sentiment'] = sentiment
+                analyzed_data.append(analyzed_news)
+            else:
+                # Eğer string ise direkt analiz et
+                sentiment = self.analyze_text(str(news))
+                analyzed_data.append({
+                    'text': str(news),
+                    'sentiment': sentiment
+                })
+        
+        return analyzed_data
+    
+    def get_market_sentiment_score(self, symbol, days=30):
+        """
+        Belirli bir hisse senedi için genel piyasa sentiment skoru hesaplar
+        
+        Args:
+            symbol (str): Hisse senedi sembolü
+            days (int): Kaç günlük veri kullanılacağı
+            
+        Returns:
+            float: -1 ile 1 arasında sentiment skoru
+        """
+        try:
+            # Basit piyasa sentiment hesaplaması
+            # Gerçek uygulamada burada haber API'lerinden veri çekilebilir
+            
+            # Şimdilik rastgele/basit bir hesaplama yapalım
+            # Bu, gerçek sentiment verisi yerine örnek bir implementasyon
+            
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period=f"{days}d")
+            
+            if len(hist) < 5:
+                return 0.0
+            
+            # Basit trend analizi ile sentiment tahmini
+            recent_prices = hist['Close'].tail(5)
+            price_change = (recent_prices.iloc[-1] - recent_prices.iloc[0]) / recent_prices.iloc[0]
+            
+            # Volatilite kontrolü
+            volatility = hist['Close'].pct_change().std()
+            
+            # Basit sentiment skoru (-1 ile 1 arasında)
+            sentiment_score = price_change * 2  # -1 ile 1 arasına normalize et
+            sentiment_score = max(-1, min(1, sentiment_score))
+            
+            # Yüksek volatilite sentiment skorunu azaltır
+            if volatility > 0.05:  # %5'ten fazla volatilite
+                sentiment_score *= 0.7
+            
+            return sentiment_score
+            
+        except Exception as e:
+            self.logger.error(f"Piyasa sentiment skoru hesaplama hatası: {e}")
+            return 0.0
 
+def simple_sentiment_analysis(text):
+    """
+    Basit sentiment analizi fonksiyonu (geriye uyumluluk için)
+    
+    Args:
+        text (str): Analiz edilecek metin
+        
+    Returns:
+        dict: Sentiment analizi sonuçları
+    """
+    analyzer = SentimentAnalyzer()
+    return analyzer.analyze_text(text)
 
-# Örnek veri setiyle eğitim fonksiyonu
-def train_with_sample_data():
-    """Örnek veri setiyle modeli eğitir"""
-    # Örnek finansal haberler ve duyarlılıkları
-    # 1: Pozitif, 0: Nötr/Negatif
-    sample_texts = [
-        "Borsa güne yükselişle başladı",
-        "Endeks rekor kırdı",
-        "Hisseler değer kazandı",
-        "Yatırımcılar kar etti",
-        "Ekonomik büyüme beklentilerin üzerinde",
-        "Şirket karları arttı",
-        "İhracat rakamları yükseldi",
-        "Piyasalarda olumlu hava",
-        "Faiz indirimi bekleniyor",
-        "Ekonomik veriler olumlu sinyal verdi",
-        "Borsa sert düştü",
-        "Hisseler değer kaybetti",
-        "Piyasalar negatif seyrediyor",
-        "Yatırımcılar zarar etti",
-        "Ekonomik daralma bekleniyor",
-        "Şirket zararları arttı",
-        "İhracat rakamları geriledi",
-        "Piyasalarda olumsuz hava",
-        "Faiz artışı bekleniyor",
-        "Ekonomik veriler olumsuz sinyal verdi"
-    ]
-    
-    sample_labels = [
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    ]
-    
-    # Analiz nesnesini oluştur
+# Modül test fonksiyonu
+if __name__ == "__main__":
+    # Test kodları
     analyzer = SentimentAnalyzer()
     
-    # Eğit
-    report = analyzer.train(sample_texts, sample_labels)
-    
-    print("Model eğitim raporu:")
-    print(f"Doğruluk: {report['accuracy']:.2f}")
-    print(f"Pozitif F1 skoru: {report['1']['f1-score']:.2f}")
-    print(f"Negatif F1 skoru: {report['0']['f1-score']:.2f}")
-    
-    return analyzer
-
-
-# Örnek kullanım
-if __name__ == "__main__":
-    # Örnek model eğitimi
-    analyzer = train_with_sample_data()
-    
-    # Örnek tahmin
     test_texts = [
-        "Piyasalar güçlü bir yükseliş gösterdi",
-        "Hisseler sert düşüş yaşadı",
-        "Ekonomik görünüm belirsiz"
+        "Bu hisse senedi çok iyi performans gösteriyor!",
+        "Piyasa çok kötü durumda, büyük kayıplar var.",
+        "Normal bir işlem günü, özel bir şey yok."
     ]
     
-    predictions = analyzer.predict(test_texts)
-    probabilities = analyzer.predict_proba(test_texts)
+    print("Sentiment Analizi Testleri:")
+    print("-" * 50)
     
-    print("\nTahmin Sonuçları:")
-    for text, pred, prob in zip(test_texts, predictions, probabilities):
-        sentiment = "Pozitif" if pred == 1 else "Negatif"
+    for text in test_texts:
+        result = analyzer.analyze_text(text)
         print(f"Metin: {text}")
-        print(f"Duyarlılık: {sentiment}")
-        print(f"Güven skoru: {prob:.2f}")
-        print("-" * 50) 
+        print(f"Sonuç: {result['label']} (Skor: {result['compound']:.3f})")
+        print() 

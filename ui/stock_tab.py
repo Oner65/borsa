@@ -6,13 +6,14 @@ import time
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from data.stock_data import get_stock_data, get_company_info
+from data.stock_data import get_stock_data, get_company_info, get_stock_data_cached
 from analysis.indicators import calculate_indicators, get_signals
 from analysis.charts import create_stock_chart, detect_chart_patterns
-from data.utils import save_analysis_result
+from data.db_utils import save_analysis_result
 
-# Yeni import'lar
-from config import FORECAST_PERIODS, DEFAULT_FORECAST_PERIOD, RISK_THRESHOLDS, RECOMMENDATION_THRESHOLDS
+# Config import'ları - STOCK_ANALYSIS_WINDOWS ekledim
+from config import (FORECAST_PERIODS, DEFAULT_FORECAST_PERIOD, RISK_THRESHOLDS, 
+                   RECOMMENDATION_THRESHOLDS, ML_MODEL_PARAMS, STOCK_ANALYSIS_WINDOWS)
 from utils.error_handler import handle_api_error, handle_analysis_error, log_exception, show_error_message
 from utils.analysis_utils import calculate_risk_level, calculate_recommendation, determine_trend, generate_analysis_summary
 
@@ -24,8 +25,15 @@ def render_stock_tab():
     
     col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     
+    # Session state'den selected_stock_for_analysis'i kontrol et - sadece bu sekme için
+    initial_stock = ""
+    if 'selected_stock_for_analysis' in st.session_state and st.session_state.selected_stock_for_analysis:
+        initial_stock = st.session_state.selected_stock_for_analysis
+        # Değişkeni kullandıktan sonra temizle
+        st.session_state.selected_stock_for_analysis = ""
+    
     with col1:
-        stock_symbol = st.text_input("Hisse Senedi Kodu")
+        stock_symbol = st.text_input("Hisse Senedi Kodu", value=initial_stock)
     
     # Yapılandırma dosyasından tahmin süreleri ve varsayılan değerleri al
     forecast_periods = FORECAST_PERIODS
@@ -67,7 +75,10 @@ def render_stock_tab():
         st.write("")
         refresh = st.button("Analiz Et", use_container_width=True)
     
-    if refresh or stock_symbol:
+    # Sadece buton tıklandığında veya initial stock varsa analiz yap
+    analyze_stock = refresh or (initial_stock != "" and stock_symbol != "")
+    
+    if analyze_stock:
         with st.spinner(f"{stock_symbol} verisi alınıyor ve analiz ediliyor..."):
             try:
                 # Symbol validation and formatting
@@ -103,16 +114,24 @@ def render_stock_tab():
                 last_price = df['Close'].iloc[-1]
                 prev_close = df['Close'].iloc[-2] if len(df) > 1 else last_price
                 price_change = df['Close'].pct_change().iloc[-1] * 100
-                price_change_1w = df['Close'].pct_change(5).iloc[-1] * 100 if len(df) > 5 else None
-                price_change_1m = df['Close'].pct_change(21).iloc[-1] * 100 if len(df) > 21 else None
-                price_change_3m = df['Close'].pct_change(63).iloc[-1] * 100 if len(df) > 63 else None
-                price_change_1y = df['Close'].pct_change(252).iloc[-1] * 100 if len(df) > 252 else None
+                
+                # Config'den window değerlerini al
+                window_1w = STOCK_ANALYSIS_WINDOWS["week_1"]     # 1 hafta = 5 iş günü
+                window_1m = STOCK_ANALYSIS_WINDOWS["month_1"]    # 1 ay = 21 iş günü  
+                window_3m = STOCK_ANALYSIS_WINDOWS["month_3"]    # 3 ay = 63 iş günü
+                window_1y = STOCK_ANALYSIS_WINDOWS["year_1"]     # 1 yıl = 252 iş günü
+                
+                price_change_1w = df['Close'].pct_change(window_1w).iloc[-1] * 100 if len(df) > window_1w else None
+                price_change_1m = df['Close'].pct_change(window_1m).iloc[-1] * 100 if len(df) > window_1m else None
+                price_change_3m = df['Close'].pct_change(window_3m).iloc[-1] * 100 if len(df) > window_3m else None
+                price_change_1y = df['Close'].pct_change(window_1y).iloc[-1] * 100 if len(df) > window_1y else None
                 
                 # Volatilite hesaplaması
-                volatility = df['Close'].pct_change().rolling(window=20).std().iloc[-1] * 100 if len(df) > 20 else None
+                volatility_window = STOCK_ANALYSIS_WINDOWS["volatility_window"]  # Config'den al
+                volatility = df['Close'].pct_change().rolling(window=volatility_window).std().iloc[-1] * 100 if len(df) > volatility_window else None
                 
-                # Risk seviyesi - Parametrik yaklaşım ile hesaplanıyor
-                risk_level, risk_color = calculate_risk_level(volatility)
+                # Risk seviyesi - Config'den eşikleri kullanarak hesaplanıyor
+                risk_level, risk_color = calculate_risk_level(volatility, RISK_THRESHOLDS)
                 
                 # Son fiyat değişimi
                 price_change_text = f"%{price_change:.2f}" if price_change else "N/A"
@@ -127,7 +146,6 @@ def render_stock_tab():
                 
                 # Genel piyasa durumu - BIST-100 referans alınarak  
                 try:
-                    from data.stock_data import get_stock_data_cached
                     bist100_data = get_stock_data_cached("XU100.IS", period="1mo")
                     
                     if bist100_data is not None and not bist100_data.empty:
@@ -166,7 +184,9 @@ def render_stock_tab():
                     else:
                         news_info = f"{stock_symbol} ile ilgili son bir haftada önemli bir haber bulunamadı."
                 except Exception as e:
-                    news_info = ""
+                    # Haber alınamadığında log'a kaydet ama devam et
+                    log_exception(e, f"{stock_symbol} için haber alınırken hata")
+                    news_info = f"{stock_symbol} için haber bilgisi şu anda alınamıyor."
                 
                 # Final recommendation - Parametrik yaklaşım ile hesaplanıyor
                 ma_summary = signals['Total_MA_Signal'].iloc[-1]
@@ -183,8 +203,8 @@ def render_stock_tab():
                 osc_buy_count = sum(1 for col in signals.columns if ('RSI' in col or 'Stoch' in col or 'MACD' in col or 'Williams' in col) and col.endswith('_Signal') and signals[col].iloc[-1] > 0)
                 osc_sell_count = sum(1 for col in signals.columns if ('RSI' in col or 'Stoch' in col or 'MACD' in col or 'Williams' in col) and col.endswith('_Signal') and signals[col].iloc[-1] < 0)
                 
-                # Tavsiye hesaplama
-                rec_text, rec_color = calculate_recommendation(total_summary, ma_count + osc_count)
+                # Tavsiye hesaplama - Config parametrelerini kullan
+                rec_text, rec_color = calculate_recommendation(total_summary, ma_count + osc_count, RECOMMENDATION_THRESHOLDS)
                 
                 # Risk değerlendirmesi
                 risk_desc = "düşük riskli" if risk_level == "DÜŞÜK" else ("orta riskli" if risk_level == "ORTA" else "yüksek riskli")
@@ -286,13 +306,15 @@ def render_stock_tab():
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Volume analysis
-                avg_volume_20d = df['Volume'].rolling(window=20).mean().iloc[-1] if len(df) > 20 else None
+                volume_window = STOCK_ANALYSIS_WINDOWS["volume_window"]  # Config'den al
+                avg_volume_20d = df['Volume'].rolling(window=volume_window).mean().iloc[-1] if len(df) > volume_window else None
                 last_volume = df['Volume'].iloc[-1]
                 volume_change = (last_volume / avg_volume_20d - 1) * 100 if avg_volume_20d else None
                 
-                # Price range
-                high_52w = df['High'].rolling(window=252).max().iloc[-1] if len(df) > 252 else df['High'].max()
-                low_52w = df['Low'].rolling(window=252).min().iloc[-1] if len(df) > 252 else df['Low'].min()
+                # Price range - 52 haftalık yüksek/düşük
+                week_52_window = STOCK_ANALYSIS_WINDOWS["week_52"]  # Config'den al
+                high_52w = df['High'].rolling(window=week_52_window).max().iloc[-1] if len(df) > week_52_window else df['High'].max()
+                low_52w = df['Low'].rolling(window=week_52_window).min().iloc[-1] if len(df) > week_52_window else df['Low'].min()
                 
                 # Additional metrics
                 col1, col2, col3, col4 = st.columns(4)
@@ -396,7 +418,14 @@ def render_stock_tab():
                     }
                     
                     # Analiz sonuçlarını kaydet
-                    save_analysis_result(stock_symbol, analysis_result)
+                    save_analysis_result(
+                        symbol=stock_symbol, 
+                        analysis_type="teknik", 
+                        price=last_price, 
+                        result_data=analysis_result, 
+                        indicators=None, 
+                        notes=simple_analysis
+                    )
                     
                     def color_ma_cells(val):
                         if val == "AL":
@@ -479,10 +508,14 @@ def render_stock_tab():
                     rec_color = "green" if "AL" in rec_text else ("red" if "SAT" in rec_text else "gray")
                     st.markdown(f"<h3 style='text-align: center; color: {rec_color};'>{rec_text}</h3>", unsafe_allow_html=True)
                     
-                    # Risk level
-                    risk_level = "YÜKSEK" if volatility and volatility > 3 else ("ORTA" if volatility and volatility > 1.5 else "DÜŞÜK")
-                    risk_color = "red" if risk_level == "YÜKSEK" else ("orange" if risk_level == "ORTA" else "green")
-                    st.markdown(f"<p style='text-align: center;'>Risk Seviyesi: <span style='color: {risk_color};'>{risk_level}</span></p>", unsafe_allow_html=True)
+                    # Risk level - Config'den eşikleri kullan
+                    risk_level_display = "YÜKSEK" if volatility and volatility > RISK_THRESHOLDS["medium"] else (
+                        "ORTA" if volatility and volatility > RISK_THRESHOLDS["low"] else "DÜŞÜK"
+                    )
+                    risk_color_display = "red" if risk_level_display == "YÜKSEK" else (
+                        "orange" if risk_level_display == "ORTA" else "green"
+                    )
+                    st.markdown(f"<p style='text-align: center;'>Risk Seviyesi: <span style='color: {risk_color_display};'>{risk_level_display}</span></p>", unsafe_allow_html=True)
                 
                 # Analyze chart patterns
                 st.subheader("Grafik Desenleri ve Destek/Direnç Seviyeleri")

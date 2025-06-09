@@ -162,7 +162,8 @@ def create_database():
             training_date TEXT NOT NULL,
             last_update_date TEXT NOT NULL,
             performance_metrics TEXT,
-            is_active INTEGER DEFAULT 1
+            is_active INTEGER DEFAULT 1,
+            model_version TEXT
         )
         ''')
         
@@ -181,7 +182,8 @@ def create_database():
                 training_date TEXT NOT NULL,
                 last_update_date TEXT NOT NULL,
                 performance_metrics TEXT,
-                is_active INTEGER DEFAULT 1
+                is_active INTEGER DEFAULT 1,
+                model_version TEXT
             )
             ''')
             # Tekrar kontrol et
@@ -1621,81 +1623,161 @@ def get_stock_info_from_db(symbol):
         logger.error(f"DB'den hisse bilgisi alınırken hata ({symbol}): {str(e)}")
         return None
 
-def save_stock_info_to_db(symbol, name, sector_en):
-    """Çekilen hisse bilgisini veritabanına kaydeder (Türkçe çeviri ile).
+def save_stock_info_to_db(symbol, name, sector_en, sector_tr=None):
+    """
+    Hisse senedi bilgilerini veritabanına kaydeder
     
     Args:
-        symbol (str): Hisse sembolü.
-        name (str): Şirket adı.
-        sector_en (str): İngilizce sektör adı.
+        symbol (str): Hisse senedi sembolü
+        name (str): Şirket adı
+        sector_en (str): İngilizce sektör adı
+        sector_tr (str, optional): Türkçe sektör adı
         
     Returns:
-        str: Kaydedilen Türkçe sektör adı veya İngilizce adı (çeviri yoksa).
+        bool: İşlem başarılıysa True, değilse False
     """
-    symbol = symbol.upper()
-    sector_tr = SECTOR_TRANSLATIONS.get(sector_en, sector_en) # Çeviri yoksa İngilizce kalsın
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("""
-        INSERT OR REPLACE INTO stock_info (symbol, name, sector_en, sector_tr, last_updated)
-        VALUES (?, ?, ?, ?, ?)
-        """, (symbol, name, sector_en, sector_tr, now))
+        
+        # Sembolü düzenle
+        symbol = symbol.upper().strip()
+        
+        # Sektör çevirisi
+        if sector_tr is None:
+            sector_tr = SECTOR_TRANSLATIONS.get(sector_en, sector_en)
+        
+        # Son güncelleme zamanı
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Mevcut kayıt kontrolü
+        cursor.execute("SELECT * FROM stock_info WHERE symbol = ?", (symbol,))
+        if cursor.fetchone():
+            # Güncelle
+            cursor.execute(
+                """UPDATE stock_info 
+                SET name = ?, sector_en = ?, sector_tr = ?, last_updated = ? 
+                WHERE symbol = ?""", 
+                (name, sector_en, sector_tr, now, symbol)
+            )
+        else:
+            # Yeni kayıt ekle
+            cursor.execute(
+                "INSERT INTO stock_info (symbol, name, sector_en, sector_tr, last_updated) VALUES (?, ?, ?, ?, ?)",
+                (symbol, name, sector_en, sector_tr, now)
+            )
+        
         conn.commit()
         conn.close()
-        logger.info(f"Hisse bilgisi DB'ye kaydedildi/güncellendi: {symbol}")
-        return sector_tr
+        
+        logger.info(f"{symbol} bilgileri veritabanına kaydedildi")
+        return True
     except Exception as e:
-        logger.error(f"DB'ye hisse bilgisi kaydedilirken hata ({symbol}): {str(e)}")
-        return sector_en # Hata durumunda İngilizce adı döndür
+        logger.error(f"Hisse bilgisi kaydedilirken hata: {str(e)}")
+        return False
 
 def get_or_fetch_stock_info(symbol):
-    """Hisse bilgisini önce DB'den alır, yoksa API'dan çeker, kaydeder ve döndürür.
+    """
+    Hisse senedi bilgilerini veritabanından alır, yoksa API'den çekip kaydeder
     
     Args:
-        symbol (str): Hisse sembolü.
+        symbol (str): Hisse senedi sembolü
         
     Returns:
-        dict: Hisse bilgileri ({'name': ..., 'sector_tr': ...}) veya None.
+        dict: Hisse senedi bilgileri
     """
-    symbol = symbol.upper()
-    # 1. DB'den kontrol et
-    stock_info = get_stock_info_from_db(symbol)
-    if stock_info:
-        return {"name": stock_info["name"], "sector_tr": stock_info["sector_tr"]}
-    
-    # 2. DB'de yoksa API'dan çek
     try:
-        from .stock_data import get_company_info # Dairesel import önlemek için burada import et
+        # Önce veritabanında kontrol et
+        symbol = symbol.upper().strip()
+        stock_info = get_stock_info_from_db(symbol)
         
-        logger.info(f"API'dan hisse bilgisi çekiliyor: {symbol}")
-        api_info = get_company_info(symbol)
+        if stock_info:
+            # Son güncelleme 7 günden eskiyse, yenileme yapma
+            try:
+                # Önce tam format ile deneyin
+                last_updated = datetime.strptime(stock_info.get('last_updated', '2000-01-01'), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                # Tam format başarısız olursa, sadece tarih formatını deneyin
+                last_updated = datetime.strptime(stock_info.get('last_updated', '2000-01-01'), "%Y-%m-%d")
+            
+            days_since_update = (datetime.now() - last_updated).days
+            
+            if days_since_update < 7:
+                return stock_info
         
-        if api_info and isinstance(api_info, dict):
-            name = api_info.get('longName') or api_info.get('shortName', symbol) # İsim bulmaya çalış
-            sector_en = api_info.get('sector', 'Bilinmiyor')
+        try:
+            # Olmayan veya eskimiş bilgileri API'den al
+            from data.stock_data import get_company_info
             
-            # 3. DB'ye kaydet (Türkçe çeviri ile)
-            sector_tr = save_stock_info_to_db(symbol, name, sector_en)
-            return {"name": name, "sector_tr": sector_tr}
-        else:
-            logger.warning(f"API'dan hisse bilgisi alınamadı veya format hatalı: {symbol}")
-            # API'dan bilgi alınamasa bile 'Bilinmiyor' olarak kaydedelim mi?
-            # save_stock_info_to_db(symbol, symbol, 'Bilinmiyor') # Opsiyonel
-            return {"name": symbol, "sector_tr": "Bilinmiyor"} # Varsayılan döndür
+            # API'ye uygun formata çevir (gerekirse)
+            api_symbol = symbol
+            if not symbol.endswith('.IS'):
+                api_symbol = f"{symbol}.IS"
             
-    except ImportError as ie:
-         logger.error(f"stock_data modülü import edilemedi: {str(ie)}")
-         return None
+            company_info = get_company_info(api_symbol)
+            
+            if company_info and company_info.get('name'):
+                # API'den bilgi alındıysa, veritabanına kaydet
+                sector_en = company_info.get('sector', '')
+                name = company_info.get('name', symbol)
+                
+                # Sektör çevirisi yap
+                sector_tr = SECTOR_TRANSLATIONS.get(sector_en, sector_en)
+                
+                # Veritabanına kaydet
+                save_stock_info_to_db(symbol, name, sector_en, sector_tr)
+                
+                # Güncel bilgileri döndür
+                return {
+                    'symbol': symbol,
+                    'name': name,
+                    'sector_en': sector_en,
+                    'sector_tr': sector_tr,
+                    'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+        except Exception as api_error:
+            logger.error(f"API'den hisse bilgisi alınırken hata: {str(api_error)}")
+        
+        # API'den bilgi alınamazsa veya hata oluşursa, elimizdeki bilgileri döndür
+        if not stock_info:
+            # Hiç bilgi yoksa, basit bir kayıt oluştur
+            sector_tr = "Bilinmiyor"
+            if "BANK" in symbol:
+                sector_tr = "Bankacılık"
+            elif "GMYO" in symbol or "GYO" in symbol:
+                sector_tr = "Gayrimenkul"
+            elif "ENER" in symbol:
+                sector_tr = "Enerji"
+            elif "HOLD" in symbol:
+                sector_tr = "Holding"
+            elif "TEKNO" in symbol:
+                sector_tr = "Teknoloji"
+            elif "METAL" in symbol:
+                sector_tr = "Metal"
+            
+            stock_info = {
+                'symbol': symbol,
+                'name': symbol,
+                'sector_en': '',
+                'sector_tr': sector_tr,
+                'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            # Basit kaydı veritabanına ekle
+            save_stock_info_to_db(symbol, symbol, '', sector_tr)
+        
+        return stock_info
     except Exception as e:
-        logger.error(f"API'dan hisse bilgisi alınırken hata ({symbol}): {str(e)}")
-        # Hata durumunda da 'Bilinmiyor' olarak kaydedelim mi?
-        # save_stock_info_to_db(symbol, symbol, 'Bilinmiyor') # Opsiyonel
-        return {"name": symbol, "sector_tr": "Bilinmiyor"} # Varsayılan döndür 
+        logger.error(f"Hisse bilgisi alınırken hata: {str(e)}")
+        return {
+            'symbol': symbol,
+            'name': symbol,
+            'sector_en': '',
+            'sector_tr': 'Bilinmiyor',
+            'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
 
-def save_ml_model(symbol, model_type, model_data, features_used=None, performance_metrics=None):
+def save_ml_model(symbol, model_type, model_data, features_used=None, performance_metrics=None, model_version=None):
     """Eğitilmiş ML modelini veritabanına kaydeder.
     
     Args:
@@ -1704,6 +1786,7 @@ def save_ml_model(symbol, model_type, model_data, features_used=None, performanc
         model_data (bytes): Pickle ile serileştirilmiş model verisi.
         features_used (list, optional): Kullanılan özellikler.
         performance_metrics (dict, optional): Model performans metrikleri.
+        model_version (str, optional): Model versiyonu. Belirtilmezse otomatik oluşturulur.
         
     Returns:
         bool: İşlem başarılıysa True, değilse False.
@@ -1718,43 +1801,96 @@ def save_ml_model(symbol, model_type, model_data, features_used=None, performanc
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
+        # Tablo yapısını kontrol et ve gerekirse model_version sütununu ekle
+        cursor.execute("PRAGMA table_info(ml_models)")
+        columns = cursor.fetchall()
+        column_names = [col[1] for col in columns]
+        
+        if 'model_version' not in column_names:
+            try:
+                cursor.execute("ALTER TABLE ml_models ADD COLUMN model_version TEXT")
+                logger.info("ml_models tablosuna model_version sütunu eklendi")
+            except Exception as e:
+                logger.error(f"model_version sütunu eklenirken hata: {str(e)}")
+        
+        # Model versiyonu oluştur (belirtilmemişse)
+        if not model_version:
+            # Bugünün tarihi ve saati ile versiyon oluştur (YYYYMMDD_HHMMSS formatında)
+            model_version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
         # Daha önce kaydedilmiş aynı sembol ve model tipi var mı kontrol et
         cursor.execute(
-            "SELECT id FROM ml_models WHERE symbol = ? AND model_type = ? AND is_active = 1", 
+            "SELECT id, model_version FROM ml_models WHERE symbol = ? AND model_type = ? AND is_active = 1", 
             (symbol, model_type)
         )
         existing_model = cursor.fetchone()
         
         if existing_model:
-            # Varsa güncelle
+            # Mevcut modeli pasif hale getir (arşivle)
             cursor.execute("""
             UPDATE ml_models 
-            SET model_data = ?, features_used = ?, last_update_date = ?, performance_metrics = ?
+            SET is_active = 0
             WHERE id = ?
-            """, (model_data, features_json, now, metrics_json, existing_model[0]))
-        else:
-            # Yoksa yeni ekle
+            """, (existing_model[0],))
+            
+            # Yeni versiyon bilgisini kaydet
+            old_version = existing_model[1] if existing_model[1] else "v1"
+            
+            # Eski versiyon numarasından bir sonraki versiyonu belirle
+            if not model_version:
+                if old_version and old_version.startswith('v'):
+                    try:
+                        # Versiyon numarasını arttır (örn: v1 -> v2)
+                        if '_' in old_version:
+                            base_version = old_version.split('_')[0]
+                            if base_version[1:].isdigit():
+                                version_num = int(base_version[1:]) + 1
+                                model_version = f"v{version_num}_{datetime.now().strftime('%Y%m%d')}"
+                        else:
+                            if old_version[1:].isdigit():
+                                version_num = int(old_version[1:]) + 1
+                                model_version = f"v{version_num}"
+                    except:
+                        model_version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            # Yeni model kaydı oluştur
             cursor.execute("""
             INSERT INTO ml_models 
-            (symbol, model_type, model_data, features_used, training_date, last_update_date, performance_metrics, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-            """, (symbol, model_type, model_data, features_json, now, now, metrics_json))
+            (symbol, model_type, model_data, features_used, training_date, last_update_date, performance_metrics, is_active, model_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """, (symbol, model_type, model_data, features_json, now, now, metrics_json, model_version))
+            
+            logger.info(f"{symbol} için {model_type} modeli güncellendi. Yeni versiyon: {model_version}, Eski versiyon: {old_version}")
+        else:
+            # İlk versiyon olarak kaydet
+            if not model_version:
+                model_version = "v1"
+                
+            # Yeni model kaydı oluştur
+            cursor.execute("""
+            INSERT INTO ml_models 
+            (symbol, model_type, model_data, features_used, training_date, last_update_date, performance_metrics, is_active, model_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """, (symbol, model_type, model_data, features_json, now, now, metrics_json, model_version))
+            
+            logger.info(f"{symbol} için {model_type} modeli ilk kez kaydedildi. Versiyon: {model_version}")
         
         conn.commit()
         conn.close()
-        logger.info(f"{symbol} için {model_type} modeli veritabanına kaydedildi.")
+        
         return True
     except Exception as e:
-        logger.error(f"ML modeli kaydedilirken hata ({symbol}, {model_type}): {str(e)}")
+        logger.error(f"ML modeli kaydedilirken hata: {str(e)}")
         logger.error(traceback.format_exc())
         return False
 
-def load_ml_model(symbol, model_type=None):
+def load_ml_model(symbol, model_type=None, version=None):
     """Veritabanından ML modelini yükler.
     
     Args:
         symbol (str): Hisse sembolü.
         model_type (str, optional): Model tipi. Belirtilmezse tüm modeller döndürülür.
+        version (str, optional): Model versiyonu. Belirtilmezse aktif versiyon kullanılır.
         
     Returns:
         dict veya None: Model verileri içeren sözlük veya işlem başarısızsa None.
@@ -1766,15 +1902,25 @@ def load_ml_model(symbol, model_type=None):
         
         if model_type:
             # Belirli bir model tipi için sorgu
-            cursor.execute("""
-            SELECT model_data, features_used, training_date, last_update_date, performance_metrics, model_type
-            FROM ml_models 
-            WHERE symbol = ? AND model_type = ? AND is_active = 1
-            """, (symbol, model_type))
+            if version:
+                # Belirli bir versiyon için
+                cursor.execute("""
+                SELECT model_data, features_used, training_date, last_update_date, performance_metrics, model_type, model_version
+                FROM ml_models 
+                WHERE symbol = ? AND model_type = ? AND model_version = ?
+                """, (symbol, model_type, version))
+            else:
+                # Aktif versiyon için
+                cursor.execute("""
+                SELECT model_data, features_used, training_date, last_update_date, performance_metrics, model_type, model_version
+                FROM ml_models 
+                WHERE symbol = ? AND model_type = ? AND is_active = 1
+                """, (symbol, model_type))
+            
             result = cursor.fetchone()
             
             if result:
-                model_data, features_json, training_date, last_update_date, metrics_json, model_type = result
+                model_data, features_json, training_date, last_update_date, metrics_json, model_type, model_version = result
                 features = json.loads(features_json) if features_json else None
                 metrics = json.loads(metrics_json) if metrics_json else None
                 
@@ -1784,23 +1930,34 @@ def load_ml_model(symbol, model_type=None):
                     'training_date': training_date,
                     'last_update_date': last_update_date,
                     'metrics': metrics,
-                    'model_type': model_type
+                    'model_type': model_type,
+                    'model_version': model_version
                 }
                 conn.close()
                 return model_info
         else:
             # Tüm model tipleri için sorgu
-            cursor.execute("""
-            SELECT model_data, features_used, training_date, last_update_date, performance_metrics, model_type
-            FROM ml_models 
-            WHERE symbol = ? AND is_active = 1
-            """, (symbol,))
+            if version:
+                # Belirli bir versiyon için tüm model tipleri
+                cursor.execute("""
+                SELECT model_data, features_used, training_date, last_update_date, performance_metrics, model_type, model_version
+                FROM ml_models 
+                WHERE symbol = ? AND model_version = ?
+                """, (symbol, version))
+            else:
+                # Aktif olan tüm model tipleri
+                cursor.execute("""
+                SELECT model_data, features_used, training_date, last_update_date, performance_metrics, model_type, model_version
+                FROM ml_models 
+                WHERE symbol = ? AND is_active = 1
+                """, (symbol,))
+            
             results = cursor.fetchall()
             
             if results:
                 models = {}
                 for result in results:
-                    model_data, features_json, training_date, last_update_date, metrics_json, model_type = result
+                    model_data, features_json, training_date, last_update_date, metrics_json, model_type, model_version = result
                     features = json.loads(features_json) if features_json else None
                     metrics = json.loads(metrics_json) if metrics_json else None
                     
@@ -1809,7 +1966,8 @@ def load_ml_model(symbol, model_type=None):
                         'features': features,
                         'training_date': training_date,
                         'last_update_date': last_update_date,
-                        'metrics': metrics
+                        'metrics': metrics,
+                        'model_version': model_version
                     }
                 conn.close()
                 return models
@@ -1862,3 +2020,135 @@ def get_model_update_status(symbol, days_threshold=7):
         logger.error(f"Model güncelleme durumu kontrol edilirken hata ({symbol}): {str(e)}")
         logger.error(traceback.format_exc())
         return {} 
+
+def get_model_versions(symbol, model_type=None):
+    """Bir sembol için kayıtlı tüm model versiyonlarını döndürür.
+    
+    Args:
+        symbol (str): Hisse sembolü.
+        model_type (str, optional): Model tipi. Belirtilmezse tüm model tipleri dahil edilir.
+        
+    Returns:
+        dict: Model versiyonlarını içeren sözlük.
+    """
+    try:
+        symbol = symbol.upper().strip()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        if model_type:
+            # Belirli bir model tipi için tüm versiyonlar
+            cursor.execute("""
+            SELECT id, model_type, model_version, training_date, last_update_date, 
+                   performance_metrics, is_active
+            FROM ml_models 
+            WHERE symbol = ? AND model_type = ?
+            ORDER BY training_date DESC
+            """, (symbol, model_type))
+        else:
+            # Tüm model tipleri için tüm versiyonlar
+            cursor.execute("""
+            SELECT id, model_type, model_version, training_date, last_update_date, 
+                   performance_metrics, is_active
+            FROM ml_models 
+            WHERE symbol = ?
+            ORDER BY model_type, training_date DESC
+            """, (symbol,))
+        
+        results = cursor.fetchall()
+        versions = {}
+        
+        for result in results:
+            id, model_type, model_version, training_date, last_update_date, metrics_json, is_active = result
+            metrics = json.loads(metrics_json) if metrics_json else None
+            
+            if model_type not in versions:
+                versions[model_type] = []
+                
+            version_info = {
+                'id': id,
+                'model_version': model_version if model_version else "v1",
+                'training_date': training_date,
+                'last_update_date': last_update_date,
+                'metrics': metrics,
+                'is_active': bool(is_active)
+            }
+            
+            versions[model_type].append(version_info)
+        
+        conn.close()
+        return versions
+    except Exception as e:
+        logger.error(f"Model versiyonları alınırken hata ({symbol}, {model_type}): {str(e)}")
+        logger.error(traceback.format_exc())
+        return {}
+
+def rollback_model_version(symbol, model_type, version_id=None, version_name=None):
+    """Belirli bir model versiyonunu aktif hale getirir (rollback).
+    
+    Args:
+        symbol (str): Hisse sembolü.
+        model_type (str): Model tipi.
+        version_id (int, optional): Versiyon ID'si.
+        version_name (str, optional): Versiyon adı.
+        
+    Returns:
+        bool: İşlem başarılıysa True, değilse False.
+    """
+    try:
+        if not version_id and not version_name:
+            logger.error("Rollback için version_id veya version_name belirtilmelidir.")
+            return False
+            
+        symbol = symbol.upper().strip()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Önce mevcut aktif versiyonu bul
+        cursor.execute("""
+        SELECT id FROM ml_models 
+        WHERE symbol = ? AND model_type = ? AND is_active = 1
+        """, (symbol, model_type))
+        current_active = cursor.fetchone()
+        
+        # Rollback yapılacak versiyonu bul
+        if version_id:
+            cursor.execute("""
+            SELECT id FROM ml_models 
+            WHERE id = ? AND symbol = ? AND model_type = ?
+            """, (version_id, symbol, model_type))
+        else:
+            cursor.execute("""
+            SELECT id FROM ml_models 
+            WHERE symbol = ? AND model_type = ? AND model_version = ?
+            """, (symbol, model_type, version_name))
+            
+        target_version = cursor.fetchone()
+        
+        if not target_version:
+            logger.error(f"Belirtilen versiyon bulunamadı: {version_id or version_name}")
+            conn.close()
+            return False
+            
+        # Mevcut aktif versiyonu pasif yap
+        if current_active:
+            cursor.execute("""
+            UPDATE ml_models SET is_active = 0
+            WHERE id = ?
+            """, (current_active[0],))
+            
+        # Hedef versiyonu aktif yap
+        cursor.execute("""
+        UPDATE ml_models SET is_active = 1, last_update_date = ?
+        WHERE id = ?
+        """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), target_version[0]))
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"{symbol} için {model_type} modeli, versiyon {version_id or version_name}'e geri döndürüldü.")
+        return True
+    except Exception as e:
+        logger.error(f"Model versiyonu geri alma işleminde hata: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False

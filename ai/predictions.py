@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
@@ -14,402 +14,1028 @@ import os
 import pickle
 from io import BytesIO
 import sys
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import RandomizedSearchCV
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
 
 # İçe aktarma için projenin ana dizinini ekleyebiliriz
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data.analysis_functions import calculate_indicators
+from analysis.indicators import calculate_indicators
 
-def ml_price_prediction(stock_symbol, stock_data, days_to_predict=30, threshold=0.03, model_type="RandomForest", model_params=None):
+def validate_and_clean_data(df, symbol):
     """
-    Makine öğrenimi ile hisse senedi fiyat tahmini yapar
+    Veri kalitesini kontrol eder ve temizler
+    
+    Args:
+        df: Ham veri DataFrame'i
+        symbol: Hisse senedi sembolü
+        
+    Returns:
+        Temizlenmiş DataFrame veya None
     """
     try:
-        # Model parametrelerini tanımla
+        print(f"DEBUG: {symbol} - Veri validasyonu başlatılıyor...")
+        
+        # Temel kontroller
+        if df is None or df.empty:
+            print(f"ERROR: {symbol} - Boş veri seti")
+            return None
+            
+        if len(df) < 60:
+            print(f"ERROR: {symbol} - Yetersiz veri ({len(df)} < 60 gün)")
+            return None
+        
+        # Gerekli kolonları kontrol et
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            print(f"ERROR: {symbol} - Eksik kolonlar: {missing_cols}")
+            return None
+        
+        # Veri tipi kontrolü
+        for col in required_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Negatif fiyat kontrolü
+        price_cols = ['Open', 'High', 'Low', 'Close']
+        for col in price_cols:
+            negative_count = (df[col] <= 0).sum()
+            if negative_count > 0:
+                print(f"WARNING: {symbol} - {col} kolonunda {negative_count} negatif/sıfır değer bulundu")
+                df = df[df[col] > 0]
+        
+        # Volume kontrolü
+        if 'Volume' in df.columns:
+            zero_volume = (df['Volume'] == 0).sum()
+            if zero_volume > len(df) * 0.1:  # %10'dan fazla sıfır volume varsa
+                print(f"WARNING: {symbol} - Volume verilerinde %{(zero_volume/len(df))*100:.1f} sıfır değer")
+        
+        # OHLC mantık kontrolü
+        invalid_ohlc = ((df['High'] < df['Low']) | 
+                       (df['High'] < df['Open']) | 
+                       (df['High'] < df['Close']) |
+                       (df['Low'] > df['Open']) | 
+                       (df['Low'] > df['Close'])).sum()
+        
+        if invalid_ohlc > 0:
+            print(f"WARNING: {symbol} - {invalid_ohlc} satırda geçersiz OHLC ilişkisi")
+            # Geçersiz satırları kaldır
+            valid_mask = ((df['High'] >= df['Low']) & 
+                         (df['High'] >= df['Open']) & 
+                         (df['High'] >= df['Close']) &
+                         (df['Low'] <= df['Open']) & 
+                         (df['Low'] <= df['Close']))
+            df = df[valid_mask]
+        
+        # Outlier detection ve temizleme
+        df_clean = detect_and_handle_outliers(df, symbol)
+        
+        # NaN değerleri temizle
+        initial_len = len(df_clean)
+        df_clean = df_clean.dropna()
+        dropped = initial_len - len(df_clean)
+        
+        if dropped > 0:
+            print(f"INFO: {symbol} - {dropped} satır NaN nedeniyle kaldırıldı")
+        
+        # Final kontrol
+        if len(df_clean) < 60:
+            print(f"ERROR: {symbol} - Temizleme sonrası yetersiz veri ({len(df_clean)} < 60)")
+            return None
+            
+        print(f"SUCCESS: {symbol} - Veri validasyonu tamamlandı. Final veri uzunluğu: {len(df_clean)}")
+        return df_clean
+        
+    except Exception as e:
+        print(f"ERROR: {symbol} - Veri validasyonu hatası: {str(e)}")
+        return None
+
+def detect_and_handle_outliers(df, symbol, method='iqr'):
+    """
+    Outlier tespiti ve düzeltmesi
+    
+    Args:
+        df: DataFrame
+        symbol: Hisse senedi sembolü
+        method: 'iqr' veya 'zscore'
+        
+    Returns:
+        Temizlenmiş DataFrame
+    """
+    try:
+        df_clean = df.copy()
+        outlier_count = 0
+        
+        # Fiyat kolonları için outlier tespiti
+        price_cols = ['Open', 'High', 'Low', 'Close']
+        
+        for col in price_cols:
+            if col not in df_clean.columns:
+                continue
+                
+            if method == 'iqr':
+                Q1 = df_clean[col].quantile(0.25)
+                Q3 = df_clean[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 3 * IQR  # 3*IQR daha sıkı kontrol
+                upper_bound = Q3 + 3 * IQR
+                
+                outliers = (df_clean[col] < lower_bound) | (df_clean[col] > upper_bound)
+                
+            elif method == 'zscore':
+                z_scores = np.abs(stats.zscore(df_clean[col]))
+                outliers = z_scores > 3  # 3 sigma kuralı
+            
+            outlier_indices = df_clean[outliers].index
+            outlier_count += len(outlier_indices)
+            
+            # Outlier'ları interpolasyon ile düzelt
+            if len(outlier_indices) > 0:
+                df_clean.loc[outlier_indices, col] = np.nan
+                df_clean[col] = df_clean[col].interpolate(method='linear')
+        
+        # Volume için özel outlier kontrolü
+        if 'Volume' in df_clean.columns and len(df_clean) > 10:
+            volume_median = df_clean['Volume'].median()
+            volume_mad = df_clean['Volume'].mad()  # Median Absolute Deviation
+            
+            # Volume için daha esnek sınırlar (çok yüksek volume'lar normal olabilir)
+            volume_threshold = volume_median + 10 * volume_mad
+            extreme_volume = df_clean['Volume'] > volume_threshold
+            
+            if extreme_volume.sum() > 0:
+                print(f"INFO: {symbol} - {extreme_volume.sum()} aşırı yüksek volume değeri düzeltildi")
+                df_clean.loc[extreme_volume, 'Volume'] = volume_median
+        
+        if outlier_count > 0:
+            print(f"INFO: {symbol} - {outlier_count} outlier tespit edildi ve düzeltildi")
+            
+        return df_clean
+        
+    except Exception as e:
+        print(f"ERROR: {symbol} - Outlier temizleme hatası: {str(e)}")
+        return df
+
+def create_deterministic_seed(symbol, model_type):
+    """
+    Sembole ve model tipine dayalı deterministik seed oluşturur
+    """
+    # Sembol ve model tipini birleştir
+    combined = f"{symbol}_{model_type}"
+    
+    # Hash değeri hesapla
+    hash_value = hash(combined)
+    
+    # Pozitif bir değer garanti et ve sınırla
+    seed = abs(hash_value) % 10000
+    
+    return seed
+
+def calculate_confidence_score(y_true, y_pred, model_type, data_quality_score, volatility):
+    """
+    Kapsamlı güven skoru hesaplama
+    
+    Args:
+        y_true: Gerçek değerler
+        y_pred: Tahmin değerleri
+        model_type: Model tipi
+        data_quality_score: Veri kalitesi skoru (0-1)
+        volatility: Volatilite değeri
+        
+    Returns:
+        Güven skoru (0-100)
+    """
+    try:
+        # Temel metrikler
+        r2 = r2_score(y_true, y_pred)
+        mae = mean_absolute_error(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        
+        # MAPE (Mean Absolute Percentage Error)
+        mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+        
+        # Yön tahmini doğruluğu
+        direction_accuracy = 0
+        if len(y_true) > 1:
+            for i in range(1, len(y_true)):
+                actual_change = y_true[i] - y_true[i-1]
+                predicted_change = y_pred[i] - y_pred[i-1]
+                
+                if (actual_change >= 0 and predicted_change >= 0) or (actual_change < 0 and predicted_change < 0):
+                    direction_accuracy += 1
+                    
+            direction_accuracy = direction_accuracy / (len(y_true) - 1)
+        
+        # R2 bileşeni (ağırlık: 30%)
+        r2_component = max(0, min(100, (r2 + 1) * 50))  # R2'yi 0-100 aralığına dönüştür
+        
+        # Yön doğruluğu bileşeni (ağırlık: 25%)
+        direction_component = direction_accuracy * 100
+        
+        # MAPE bileşeni (ağırlık: 20%) - düşük MAPE iyi
+        mape_component = max(0, 100 - mape * 2)  # MAPE ne kadar düşükse o kadar iyi
+        
+        # Veri kalitesi bileşeni (ağırlık: 15%)
+        data_quality_component = data_quality_score * 100
+        
+        # Volatilite düzeltmesi (ağırlık: 10%) - yüksek volatilite güveni azaltır
+        volatility_component = max(0, 100 - volatility * 5)
+        
+        # Model tipi bonus/malus
+        model_bonus = 0
+        if model_type == "Ensemble":
+            model_bonus = 5
+        elif model_type == "Hibrit Model":
+            model_bonus = 3
+        elif model_type in ["XGBoost", "LightGBM"]:
+            model_bonus = 2
+        elif model_type == "RandomForest":
+            model_bonus = 1
+        
+        # Ağırlıklı toplam
+        confidence = (
+            r2_component * 0.30 +
+            direction_component * 0.25 +
+            mape_component * 0.20 +
+            data_quality_component * 0.15 +
+            volatility_component * 0.10 +
+            model_bonus
+        )
+        
+        # Sınırla (30-95 arası)
+        confidence = max(30, min(95, confidence))
+        
+        return confidence
+        
+    except Exception as e:
+        print(f"Güven skoru hesaplama hatası: {str(e)}")
+        return 50.0  # Varsayılan değer
+
+def calculate_data_quality_score(df):
+    """
+    Veri kalitesi skorunu hesaplar (0-1 arası)
+    """
+    try:
+        # Veri uzunluğu faktörü
+        length_factor = min(1.0, len(df) / 252)  # 1 yıl = 252 gün
+        
+        # NaN oranı faktörü
+        nan_ratio = df.isnull().sum().sum() / (len(df) * len(df.columns))
+        nan_factor = 1.0 - min(0.5, nan_ratio)  # %50'den fazla NaN varsa 0.5'e düşür
+        
+        # Volume tutarlılığı
+        volume_factor = 1.0
+        if 'Volume' in df.columns:
+            zero_volume_ratio = (df['Volume'] == 0).sum() / len(df)
+            volume_factor = 1.0 - min(0.3, zero_volume_ratio)  # %30'dan fazla sıfır volume varsa azalt
+        
+        # OHLC tutarlılığı
+        ohlc_factor = 1.0
+        if all(col in df.columns for col in ['Open', 'High', 'Low', 'Close']):
+            invalid_ohlc_ratio = ((df['High'] < df['Low']) | 
+                                 (df['High'] < df['Open']) | 
+                                 (df['High'] < df['Close']) |
+                                 (df['Low'] > df['Open']) | 
+                                 (df['Low'] > df['Close'])).sum() / len(df)
+            ohlc_factor = 1.0 - min(0.2, invalid_ohlc_ratio)
+        
+        # Genel kalite skoru
+        quality_score = (length_factor * 0.4 + 
+                        nan_factor * 0.3 + 
+                        volume_factor * 0.2 + 
+                        ohlc_factor * 0.1)
+        
+        return max(0.0, min(1.0, quality_score))
+        
+    except Exception as e:
+        print(f"Veri kalitesi hesaplama hatası: {str(e)}")
+        return 0.5  # Varsayılan değer
+
+def create_advanced_features(df):
+    """
+    Gelişmiş feature engineering - daha fazla teknik gösterge ve gecikmeli değerler
+    """
+    try:
+        df = df.copy()
+        
+        # Gecikmeli fiyatlar (lag features)
+        for lag in [1, 2, 3, 5, 10]:
+            df[f'close_lag_{lag}'] = df['Close'].shift(lag)
+            df[f'volume_lag_{lag}'] = df['Volume'].shift(lag)
+            
+        # Fiyat değişim oranları
+        for period in [1, 3, 5, 10, 20]:
+            df[f'price_change_{period}d'] = df['Close'].pct_change(period)
+            df[f'volume_change_{period}d'] = df['Volume'].pct_change(period)
+            
+        # Hareketli ortalama çaprazlamaları
+        df['sma5_sma20_ratio'] = df['SMA5'] / df['SMA20']
+        df['price_sma20_ratio'] = df['Close'] / df['SMA20']
+        
+        # Volatilite göstergeleri
+        for window in [5, 10, 20]:
+            df[f'volatility_{window}d'] = df['Close'].rolling(window).std()
+            df[f'price_range_{window}d'] = (df['High'].rolling(window).max() - df['Low'].rolling(window).min()) / df['Close']
+            
+        # Momentum göstergeleri
+        for period in [5, 10, 20]:
+            df[f'momentum_{period}d'] = df['Close'] / df['Close'].shift(period) - 1
+            
+        # Volume Price Trend (VPT)
+        df['vpt'] = (df['Close'].pct_change() * df['Volume']).cumsum()
+        
+        # True Range ve Average True Range
+        df['tr1'] = df['High'] - df['Low']
+        df['tr2'] = (df['High'] - df['Close'].shift()).abs()
+        df['tr3'] = (df['Low'] - df['Close'].shift()).abs()
+        df['true_range'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+        df['atr_14'] = df['true_range'].rolling(14).mean()
+        
+        # Price Position (BB içindeki pozisyon)
+        if all(col in df.columns for col in ['Upper_Band', 'Lower_Band']):
+            df['bb_position'] = (df['Close'] - df['Lower_Band']) / (df['Upper_Band'] - df['Lower_Band'])
+            
+        # Stochastic %K ve %D farkları
+        if all(col in df.columns for col in ['Stoch_%K', 'Stoch_%D']):
+            df['stoch_k_d_diff'] = df['Stoch_%K'] - df['Stoch_%D']
+            
+        # MACD histogram trend
+        if 'MACD_Hist' in df.columns:
+            df['macd_hist_change'] = df['MACD_Hist'] - df['MACD_Hist'].shift(1)
+            
+        # Hacim moving averageları
+        for period in [5, 10, 20]:
+            df[f'volume_ma_{period}'] = df['Volume'].rolling(period).mean()
+            df[f'volume_ma_ratio_{period}'] = df['Volume'] / df[f'volume_ma_{period}']
+        
+        # Temizlik
+        df = df.drop(['tr1', 'tr2', 'tr3'], axis=1, errors='ignore')
+        
+        return df
+        
+    except Exception as e:
+        print(f"Advanced feature engineering hatası: {str(e)}")
+        return df
+
+def optimize_model_hyperparameters(X_train, y_train, model_type, cv_folds=3):
+    """
+    Grid search ile model hiperparametre optimizasyonu
+    """
+    try:
+        from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+        
+        print(f"DEBUG: {model_type} için hiperparametre optimizasyonu başlatılıyor...")
+        
+        if model_type == "RandomForest":
+            from sklearn.ensemble import RandomForestRegressor
+            
+            param_grid = {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [8, 12, 16, None],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'max_features': ['sqrt', 'log2', None]
+            }
+            
+            model = RandomForestRegressor(random_state=42, n_jobs=-1)
+            
+        elif model_type == "XGBoost":
+            import xgboost as xgb
+            
+            param_grid = {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [3, 6, 9],
+                'learning_rate': [0.01, 0.1, 0.2],
+                'subsample': [0.8, 0.9, 1.0],
+                'colsample_bytree': [0.8, 0.9, 1.0]
+            }
+            
+            model = xgb.XGBRegressor(random_state=42, n_jobs=-1)
+            
+        elif model_type == "LightGBM":
+            import lightgbm as lgb
+            
+            param_grid = {
+                'n_estimators': [100, 200, 300],
+                'num_leaves': [31, 50, 100],
+                'learning_rate': [0.01, 0.1, 0.2],
+                'feature_fraction': [0.8, 0.9, 1.0],
+                'bagging_fraction': [0.8, 0.9, 1.0]
+            }
+            
+            model = lgb.LGBMRegressor(random_state=42, n_jobs=-1, verbose=-1)
+        
+        elif model_type == "Ensemble":
+            # Ensemble modeli için basit parametre optimizasyonu
+            # Her alt model için temel parametreleri optimize ederiz
+            from sklearn.ensemble import RandomForestRegressor
+            
+            param_grid = {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [8, 12, 16],
+                'min_samples_split': [2, 5, 10],
+                'learning_rate': [0.01, 0.1, 0.2]  # XGBoost/LightGBM için
+            }
+            
+            # Ensemble için RandomForest parametrelerini optimize et
+            # Sonuçları diğer modeller için de kullanacağız
+            model = RandomForestRegressor(random_state=42, n_jobs=-1)
+        
+        else:
+            return None
+        
+        # RandomizedSearchCV ile daha hızlı optimizasyon
+        search = RandomizedSearchCV(
+            model, 
+            param_grid, 
+            n_iter=20,  # Daha az iterasyon ile hızlandırma
+            cv=cv_folds,
+            scoring='neg_mean_squared_error',
+            n_jobs=-1,
+            random_state=42
+        )
+        
+        search.fit(X_train, y_train)
+        
+        print(f"DEBUG: En iyi parametreler: {search.best_params_}")
+        print(f"DEBUG: En iyi CV skoru: {-search.best_score_:.4f}")
+        
+        return search.best_estimator_
+        
+    except Exception as e:
+        print(f"Hiperparametre optimizasyonu hatası: {str(e)}")
+        return None
+
+def walk_forward_validation(X, y, model_class, model_params, n_splits=5, test_size=0.2):
+    """
+    Walk-forward validation ile zaman serisi modeli değerlendirme
+    """
+    try:
+        from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+        
+        n_samples = len(X)
+        step_size = int(n_samples * test_size / n_splits)
+        min_train_size = int(n_samples * 0.6)  # Minimum eğitim verisi
+        
+        scores = {'r2': [], 'mse': [], 'mae': [], 'direction_accuracy': []}
+        
+        for i in range(n_splits):
+            # Test setinin başlangıç ve bitiş indeksleri
+            test_start = min_train_size + i * step_size
+            test_end = min(test_start + step_size, n_samples)
+            
+            if test_end - test_start < 10:  # Minimum test boyutu
+                break
+                
+            # Train/test split
+            X_train = X[:test_start]
+            y_train = y[:test_start]
+            X_test = X[test_start:test_end]
+            y_test = y[test_start:test_end]
+            
+            # Model eğitimi
+            if model_class == "RandomForest":
+                from sklearn.ensemble import RandomForestRegressor
+                model = RandomForestRegressor(**model_params)
+            elif model_class == "XGBoost":
+                import xgboost as xgb
+                model = xgb.XGBRegressor(**model_params)
+            elif model_class == "LightGBM":
+                import lightgbm as lgb
+                model = lgb.LGBMRegressor(**model_params)
+            elif model_class == "Ensemble":
+                # Ensemble için basit bir yaklaşım - sadece RandomForest kullan
+                from sklearn.ensemble import RandomForestRegressor
+                rf_params = {k: v for k, v in model_params.items() if k in ['n_estimators', 'max_depth', 'min_samples_split', 'min_samples_leaf', 'max_features', 'random_state', 'n_jobs']}
+                model = RandomForestRegressor(**rf_params)
+            else:
+                continue
+                
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            
+            # Skorları hesapla
+            r2 = r2_score(y_test, y_pred)
+            mse = mean_squared_error(y_test, y_pred)
+            mae = mean_absolute_error(y_test, y_pred)
+            
+            # Yön doğruluğu hesapla
+            actual_direction = (y_test[1:] > y_test[:-1]).astype(int)
+            pred_direction = (y_pred[1:] > y_pred[:-1]).astype(int)
+            direction_accuracy = (actual_direction == pred_direction).mean()
+            
+            scores['r2'].append(r2)
+            scores['mse'].append(mse)
+            scores['mae'].append(mae)
+            scores['direction_accuracy'].append(direction_accuracy)
+            
+        # Ortalama skorları döndür
+        avg_scores = {metric: np.mean(values) for metric, values in scores.items()}
+        return avg_scores
+        
+    except Exception as e:
+        print(f"Walk-forward validation hatası: {str(e)}")
+        return {'r2': -1, 'mse': float('inf'), 'mae': float('inf'), 'direction_accuracy': 0.5}
+
+def enhanced_confidence_score(y_true, y_pred, model_type, data_quality_score, volatility, walk_forward_scores=None):
+    """
+    Gelişmiş güven skoru hesaplama
+    """
+    try:
+        confidence_factors = {}
+        
+        # 1. Model performansı (R² skoru)
+        r2 = r2_score(y_true, y_pred)
+        if r2 > 0.8:
+            r2_score_normalized = 1.0
+        elif r2 > 0.5:
+            r2_score_normalized = 0.7 + (r2 - 0.5) * 0.6  # 0.5-0.8 arası için 0.7-0.88
+        elif r2 > 0:
+            r2_score_normalized = 0.4 + (r2 * 0.6)  # 0-0.5 arası için 0.4-0.7
+        else:
+            r2_score_normalized = max(0.1, 0.4 + r2 * 0.2)  # Negatif R² için 0.1-0.4
+            
+        confidence_factors['r2_factor'] = r2_score_normalized
+        
+        # 2. Yön doğruluğu
+        actual_direction = (y_true[1:] > y_true[:-1]).astype(int)
+        pred_direction = (y_pred[1:] > y_pred[:-1]).astype(int)
+        direction_accuracy = (actual_direction == pred_direction).mean()
+        confidence_factors['direction_factor'] = direction_accuracy
+        
+        # 3. Tahmin tutarlılığı (düşük varyans daha iyi)
+        prediction_variance = np.var(y_pred - y_true) / np.var(y_true)
+        consistency_factor = max(0.1, 1 - min(prediction_variance, 2))
+        confidence_factors['consistency_factor'] = consistency_factor
+        
+        # 4. Veri kalitesi faktörü
+        confidence_factors['data_quality_factor'] = data_quality_score
+        
+        # 5. Volatilite ayarlaması (düşük volatilite daha güvenilir)
+        volatility_factor = max(0.5, 1 - (volatility / 100))
+        confidence_factors['volatility_factor'] = volatility_factor
+        
+        # 6. Walk-forward validation skorları (varsa)
+        if walk_forward_scores:
+            wf_r2 = walk_forward_scores.get('r2', 0)
+            wf_direction = walk_forward_scores.get('direction_accuracy', 0.5)
+            wf_factor = (wf_r2 * 0.6 + wf_direction * 0.4)
+            confidence_factors['walk_forward_factor'] = max(0.1, wf_factor)
+        else:
+            confidence_factors['walk_forward_factor'] = 0.6  # Varsayılan
+            
+        # 7. Model tipi güvenilirlik faktörü
+        model_reliability = {
+            "RandomForest": 0.85,
+            "XGBoost": 0.90,
+            "LightGBM": 0.88,
+            "Ensemble": 0.92,
+            "Hibrit Model": 0.80
+        }
+        confidence_factors['model_factor'] = model_reliability.get(model_type, 0.75)
+        
+        # Ağırlıklı ortalama ile final güven skoru
+        weights = {
+            'r2_factor': 0.25,
+            'direction_factor': 0.20,
+            'consistency_factor': 0.15,
+            'data_quality_factor': 0.15,
+            'volatility_factor': 0.10,
+            'walk_forward_factor': 0.10,
+            'model_factor': 0.05
+        }
+        
+        final_confidence = sum(confidence_factors[factor] * weights[factor] 
+                             for factor in confidence_factors)
+        
+        # 0-100 arasına ölçekle ve sınırla
+        final_confidence = max(25, min(95, final_confidence * 100))
+        
+        print(f"DEBUG: Güven faktörleri: {confidence_factors}")
+        print(f"DEBUG: Final güven skoru: {final_confidence:.1f}%")
+        
+        return final_confidence
+        
+    except Exception as e:
+        print(f"Güven skoru hesaplama hatası: {str(e)}")
+        return 45.0  # Güvenli varsayılan değer
+
+def ml_price_prediction(stock_symbol, stock_data, days_to_predict=30, threshold=0.03, model_type="RandomForest", model_params=None, prediction_params=None):
+    """
+    Geliştirilmiş makine öğrenimi ile hisse senedi fiyat tahmini
+    
+    Args:
+        stock_symbol: Hisse senedi sembolü
+        stock_data: Fiyat verileri (DataFrame)
+        days_to_predict: Tahmin edilecek gün sayısı
+        threshold: Trend belirleme eşiği
+        model_type: Kullanılacak model türü
+        model_params: Model parametreleri
+        prediction_params: Tahmin parametreleri
+    
+    Returns:
+        dict: Tahmin sonuçları veya None (başarısız durumda)
+    """
+    
+    try:
+        print(f"DEBUG: {stock_symbol} için geliştirilmiş ML tahmin başlatılıyor - Model: {model_type}")
+        
+        # Deterministik seed kurulumu
+        seed_value = create_deterministic_seed(stock_symbol, model_type)
+        np.random.seed(seed_value)
+        random.seed(seed_value)
+        
+        print(f"DEBUG: Deterministik seed kullanılıyor: {seed_value}")
+        
+        # Veriyi doğrula ve temizle
+        df = validate_and_clean_data(stock_data.copy(), stock_symbol)
+        if df is None:
+            print(f"ERROR: {stock_symbol} - Veri validasyonu başarısız")
+            return None
+        
+        # Veri kalitesi skorunu hesapla
+        data_quality_score = calculate_data_quality_score(df)
+        print(f"DEBUG: Veri kalitesi skoru: {data_quality_score:.3f}")
+        
+        # Teknik göstergeleri hesapla (eğer yoksa)
+        try:
+            if 'SMA20' not in df.columns:
+                print(f"DEBUG: {stock_symbol} için teknik göstergeler hesaplanıyor...")
+                df = calculate_indicators(df)
+                print(f"DEBUG: Teknik göstergeler hesaplandı, toplam sütun sayısı: {len(df.columns)}")
+        except Exception as indicator_error:
+            print(f"Teknik gösterge hesaplama hatası: {str(indicator_error)}")
+            # Temel göstergeleri kendimiz hesaplayalım
+            for period in [5, 10, 20]:
+                df[f'SMA{period}'] = df['Close'].rolling(window=period).mean()
+        
+        # Gelişmiş feature engineering
+        print("DEBUG: Gelişmiş feature engineering uygulanıyor...")
+        df = create_advanced_features(df)
+        
+        # Final temizlik - daha az agresif
+        initial_length = len(df)
+        df = df.dropna()
+        removed_rows = initial_length - len(df)
+        print(f"DEBUG: {removed_rows} satır NaN nedeniyle kaldırıldı ({initial_length} -> {len(df)})")
+        
+        if len(df) < 100:  # Minimum veri gereksinimi artırıldı
+            print(f"ERROR: {stock_symbol} için yeterli veri yok: {len(df)} < 100")
+            return None
+        
+        # Model parametrelerini kontrol et
         if model_params is None:
             model_params = {}
         
-        # İşlenecek veri kopyası oluştur
-        df = stock_data.copy()
+        if prediction_params is None:
+            prediction_params = {}
         
-        # Eksik değerleri doldur
-        df = df.fillna(method='ffill')
+        # Gelişmiş özellik seçimi
+        base_features = ['Open', 'High', 'Low', 'Close', 'Volume']
+        technical_features = [col for col in df.columns if any(indicator in col.lower() 
+                            for indicator in ['sma', 'ema', 'rsi', 'macd', 'band', 'stoch', 'adx'])]
+        advanced_features = [col for col in df.columns if any(pattern in col.lower() 
+                           for pattern in ['lag', 'change', 'ratio', 'momentum', 'volatility', 'vpt', 'atr'])]
         
-        # Sadece kapanış fiyatları ile başla
-        df_close = df['Close'].values.reshape(-1, 1)
+        all_potential_features = base_features + technical_features + advanced_features
         
-        # Veriyi ölçeklendir (0 ile 1 arasında)
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = scaler.fit_transform(df_close)
+        # Kullanılabilir özellikleri filtrele - daha gevşek kriterler
+        available_features = []
+        for feature in all_potential_features:
+            if feature in df.columns:
+                non_na_ratio = df[feature].notna().sum() / len(df)
+                if non_na_ratio > 0.7:  # %70 non-NA yeterli
+                    available_features.append(feature)
         
-        # Özellikler ve etiketler oluştur (her gün için önceki 60 gün)
-        X = []
-        y = []
-        window_size = min(60, len(scaled_data)-1)
+        print(f"DEBUG: Kullanılabilir özellikler ({len(available_features)}): {available_features[:10]}...")
         
-        for i in range(window_size, len(scaled_data)):
-            X.append(scaled_data[i-window_size:i, 0])
-            y.append(scaled_data[i, 0])
+        if len(available_features) < 10:  # Minimum özellik sayısı artırıldı
+            print(f"ERROR: Yeterli özellik yok. En az 10 gerekli, mevcut: {len(available_features)}")
+            return None
         
-        X, y = np.array(X), np.array(y)
+        # Son fiyat ve volatilite hesapla
+        last_price = df['Close'].iloc[-1]
+        returns = df['Close'].pct_change().dropna()
+        volatility = returns.std() * np.sqrt(252) * 100  # Yıllık volatilite
         
-        # Veriyi eğitim ve test setlerine ayır
-        train_size = int(len(X) * 0.8)
-        X_train, X_test = X[:train_size], X[train_size:]
-        y_train, y_test = y[:train_size], y[train_size:]
-        
-        # Model seçimi
-        if model_type == "XGBoost":
-            try:
-                from xgboost import XGBRegressor
-                # XGBoost parametrelerini al
-                n_estimators = model_params.get("n_estimators", 100)
-                learning_rate = model_params.get("learning_rate", 0.1)
-                max_depth = model_params.get("max_depth", 6)
-                
-                model = XGBRegressor(
-                    n_estimators=n_estimators, 
-                    learning_rate=learning_rate, 
-                    max_depth=max_depth,
-                    random_state=42
-                )
-            except ImportError:
-                # XGBoost yüklü değilse RandomForest kullan
-                st.warning("XGBoost kütüphanesi bulunamadı, RandomForest kullanılıyor.")
-                model = RandomForestRegressor(n_estimators=100, random_state=42)
-        elif model_type == "LightGBM":
-            try:
-                from lightgbm import LGBMRegressor
-                # LightGBM parametrelerini al
-                n_estimators = model_params.get("n_estimators", 100)
-                learning_rate = model_params.get("learning_rate", 0.1)
-                num_leaves = model_params.get("num_leaves", 31)
-                feature_fraction = model_params.get("feature_fraction", 1.0)
-                
-                model = LGBMRegressor(
-                    n_estimators=n_estimators, 
-                    learning_rate=learning_rate,
-                    num_leaves=num_leaves,
-                    feature_fraction=feature_fraction,
-                    random_state=42
-                )
-            except ImportError:
-                # LightGBM yüklü değilse RandomForest kullan
-                st.warning("LightGBM kütüphanesi bulunamadı, RandomForest kullanılıyor.")
-                model = RandomForestRegressor(n_estimators=100, random_state=42)
-        elif model_type == "Ensemble":
-            # Ensemble modeli: RandomForest, XGBoost ve LightGBM'in ortalaması
-            models = []
-            predictions = []
+        if pd.isna(volatility) or volatility <= 0:
+            volatility = 3.0  # Varsayılan volatilite
             
-            # RandomForest
-            rf_n_estimators = model_params.get("rf_n_estimators", 100)
-            rf_max_depth = model_params.get("rf_max_depth", None)
+        print(f"DEBUG: Son fiyat: {last_price:.2f}, Yıllık volatilite: {volatility:.2f}%")
+        
+        # Veri hazırlığı
+        X = df[available_features].values
+        y = df['Close'].values
             
-            rf_model = RandomForestRegressor(
-                n_estimators=rf_n_estimators, 
-                max_depth=rf_max_depth,
-                random_state=42
+        # Veri ölçeklendirme
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Walk-forward validation kullan
+        use_walk_forward = prediction_params.get('use_walk_forward_validation', True)
+        
+        if use_walk_forward:
+            print("DEBUG: Walk-forward validation ile model değerlendiriliyor...")
+            
+            # Model hiperparametre optimizasyonu
+            print("DEBUG: Hiperparametre optimizasyonu yapılıyor...")
+            optimized_model = optimize_model_hyperparameters(
+                X_scaled[:-int(len(X_scaled)*0.2)], 
+                y[:-int(len(y)*0.2)], 
+                model_type, 
+                cv_folds=3
             )
-            models.append(("RandomForest", rf_model))
             
-            # XGBoost
-            try:
-                from xgboost import XGBRegressor
-                xgb_n_estimators = model_params.get("xgb_n_estimators", 100)
-                xgb_learning_rate = model_params.get("xgb_learning_rate", 0.1)
-                xgb_max_depth = model_params.get("xgb_max_depth", 6)
+            if optimized_model is not None:
+                # Optimized model parametrelerini al
+                model_params_optimized = optimized_model.get_params()
                 
-                xgb_model = XGBRegressor(
-                    n_estimators=xgb_n_estimators, 
-                    learning_rate=xgb_learning_rate,
-                    max_depth=xgb_max_depth,
-                    random_state=42
+                # Walk-forward validation skorları
+                walk_forward_scores = walk_forward_validation(
+                    X_scaled, y, model_type, model_params_optimized, n_splits=5
                 )
-                models.append(("XGBoost", xgb_model))
-            except ImportError:
-                pass
-                
-            # LightGBM
-            try:
-                from lightgbm import LGBMRegressor
-                lgbm_n_estimators = model_params.get("lgbm_n_estimators", 100)
-                lgbm_learning_rate = model_params.get("lgbm_learning_rate", 0.1)
-                lgbm_num_leaves = model_params.get("lgbm_num_leaves", 31)
-                lgbm_feature_fraction = model_params.get("lgbm_feature_fraction", 1.0)
-                
-                lgbm_model = LGBMRegressor(
-                    n_estimators=lgbm_n_estimators, 
-                    learning_rate=lgbm_learning_rate,
-                    num_leaves=lgbm_num_leaves,
-                    feature_fraction=lgbm_feature_fraction,
-                    random_state=42
-                )
-                models.append(("LightGBM", lgbm_model))
-            except ImportError:
-                pass
+                print(f"DEBUG: Walk-forward validation skorları: {walk_forward_scores}")
+            else:
+                walk_forward_scores = None
+                model_params_optimized = model_params
+        else:
+            # Geleneksel train/test split
+            split_index = int(len(X_scaled) * 0.8)
+            walk_forward_scores = None
+            model_params_optimized = model_params
+        
+        # Final model eğitimi
+        print(f"DEBUG: Final {model_type} modeli eğitiliyor...")
+        
+        if model_type == "RandomForest":
+            from sklearn.ensemble import RandomForestRegressor
             
-            # Her modeli eğit
-            for name, model in models:
-                model.fit(X_train, y_train)
-                predictions.append(model.predict(X_test))
-            
-            # Tahminlerin ortalamasını al
-            y_pred = np.mean(predictions, axis=0)
-            r2 = r2_score(y_test, y_pred)
-            
-            # Gelecek tahminleri için tüm modellerin ortalamasını kullanan bir ensemble fonksiyonu
-            def ensemble_predict(x):
-                preds = []
-                for name, model in models:
-                    preds.append(model.predict(x))
-                return np.mean(preds, axis=0)
-            
-            # Sonraki günler için tahminler
-            last_window = scaled_data[-window_size:]
-            future_predictions = []
-            
-            last_window_copy = last_window.copy()
-            
-            # Gelecek günleri tahmin et
-            for _ in range(days_to_predict):
-                next_pred = ensemble_predict(last_window_copy.reshape(1, -1))[0]
-                future_predictions.append(next_pred)
-                last_window_copy = np.append(last_window_copy[1:], next_pred)
-            
-            # Tahminleri gerçek değerlere dönüştür
-            future_pred_reshaped = np.array(future_predictions).reshape(-1, 1)
-            future_pred_prices = scaler.inverse_transform(future_pred_reshaped).flatten()
-            
-            # Tahmin edilen tarihleri oluştur
-            last_date = df.index[-1]
-            future_dates = []
-            
-            for i in range(1, days_to_predict + 1):
-                next_date = last_date + timedelta(days=i)
-                # Hafta sonlarını atla
-                while next_date.weekday() >= 5:  # 5 = Cumartesi, 6 = Pazar
-                    next_date = next_date + timedelta(days=1)
-                future_dates.append(next_date)
-            
-            # Tahminleri DataFrame'e dönüştür
-            predictions_df = pd.DataFrame({
-                'Date': future_dates,
-                'Predicted Price': future_pred_prices
-            })
-            predictions_df.set_index('Date', inplace=True)
-            
-            # Başarı oranını hesapla
-            success_rate = max(min(r2 * 100, 95), 30)  # %30-%95 arasında sınırla
-            
-            # Volatilite testi ekle ve tahminleri düzelt
-            last_price = df['Close'].iloc[-1]
-            volatility = df['Close'].pct_change().std() * 100  # Günlük değişim standart sapması
-            
-            # Rastgelelik faktörü ekle
-            for i in range(len(predictions_df)):
-                # Daha yüksek volatilite, daha fazla rastgelelik demektir
-                randomness = random.uniform(-1, 1) * volatility * (i+1) / days_to_predict
-                adjustment = predictions_df['Predicted Price'].iloc[i] * randomness / 100
-                predictions_df['Predicted Price'].iloc[i] += adjustment
-            
-            # Tahminlerden trend bilgisini çıkar
-            trend = "Yükseliş" if predictions_df['Predicted Price'].iloc[-1] > last_price else "Düşüş"
-            
-            # Tahmin güven aralığı
-            confidence = random.uniform(max(30, success_rate-20), min(success_rate+10, 95))
-            
-            # Temel tahmin bilgilerini oluştur
-            prediction_info = {
-                'symbol': stock_symbol,
-                'last_price': last_price,
-                'prediction_30d': predictions_df['Predicted Price'].iloc[-1] if days_to_predict >= 30 else None,
-                'prediction_7d': predictions_df['Predicted Price'].iloc[6] if days_to_predict >= 7 else None,
-                'trend': trend,
-                'confidence': confidence,
-                'r2_score': r2,
-                'predictions_df': predictions_df
+            final_params = {
+                'n_estimators': model_params_optimized.get('n_estimators', 200),
+                'max_depth': model_params_optimized.get('max_depth', 15),
+                'min_samples_split': model_params_optimized.get('min_samples_split', 5),
+                'min_samples_leaf': model_params_optimized.get('min_samples_leaf', 2),
+                'max_features': model_params_optimized.get('max_features', 'sqrt'),
+                'random_state': seed_value,
+                'n_jobs': -1
             }
             
-            return prediction_info
+            model = RandomForestRegressor(**final_params)
             
-        elif model_type == "Hibrit Model":
-            # Hibrit model: Teknik göstergeler + ML
-            # Teknik göstergeleri dahil et (RSI, MACD, vs.)
-            # Basit bir karma model olarak RandomForest kullanıp ağırlıkları ayarla
-            
-            # Mevcut modeli eğit
-            n_estimators = model_params.get("n_estimators", 150)
-            max_depth = model_params.get("max_depth", 12)
-            
-            model = RandomForestRegressor(
-                n_estimators=n_estimators, 
-                max_depth=max_depth, 
-                random_state=42
-            )
-            model.fit(X_train, y_train)
-            
-            # Bir miktar uzman bilgisi ekle (teknik göstergelere göre değerlerde ayarlama yap)
-            rsi_val = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
-            macd_val = df['MACD'].iloc[-1] if 'MACD' in df.columns else 0
-            
-            # RSI ve MACD değerlerine göre ayarlama faktörü
-            adjustment_factor = 0.0  # Varsayılan
-            
-            if not pd.isna(rsi_val) and not pd.isna(macd_val):
-                # RSI aşırı alış/satış düzeltmesi
-                if rsi_val > 70:  # Aşırı alış
-                    adjustment_factor -= 0.02  # Fiyat tahminini düşür
-                elif rsi_val < 30:  # Aşırı satış
-                    adjustment_factor += 0.02  # Fiyat tahminini yükselt
+        elif model_type == "XGBoost":
+            try:
+                import xgboost as xgb
                 
-                # MACD sinyal düzeltmesi
-                macd_signal = df['MACD_Signal'].iloc[-1] if 'MACD_Signal' in df.columns else 0
-                if not pd.isna(macd_signal):
-                    if macd_val > macd_signal:  # Yükseliş sinyali
-                        adjustment_factor += 0.01
-                    else:  # Düşüş sinyali
-                        adjustment_factor -= 0.01
+                final_params = {
+                    'n_estimators': model_params_optimized.get('n_estimators', 200),
+                    'max_depth': model_params_optimized.get('max_depth', 8),
+                    'learning_rate': model_params_optimized.get('learning_rate', 0.1),
+                    'subsample': model_params_optimized.get('subsample', 0.8),
+                    'colsample_bytree': model_params_optimized.get('colsample_bytree', 0.8),
+                    'random_state': seed_value,
+                    'n_jobs': -1
+                }
+                
+                model = xgb.XGBRegressor(**final_params)
+                
+            except ImportError:
+                print("XGBoost kütüphanesi bulunamadı, RandomForest'a geçiliyor...")
+                return ml_price_prediction(stock_symbol, stock_data, days_to_predict, threshold, "RandomForest", model_params, prediction_params)
+            
+        elif model_type == "LightGBM":
+            try:
+                import lightgbm as lgb
+                
+                final_params = {
+                    'n_estimators': model_params_optimized.get('n_estimators', 200),
+                    'num_leaves': model_params_optimized.get('num_leaves', 50),
+                    'learning_rate': model_params_optimized.get('learning_rate', 0.1),
+                    'feature_fraction': model_params_optimized.get('feature_fraction', 0.8),
+                    'bagging_fraction': model_params_optimized.get('bagging_fraction', 0.8),
+                    'random_state': seed_value,
+                    'n_jobs': -1,
+                    'verbose': -1
+                }
+                
+                model = lgb.LGBMRegressor(**final_params)
+                
+            except ImportError:
+                print("LightGBM kütüphanesi bulunamadı, RandomForest'a geçiliyor...")
+                return ml_price_prediction(stock_symbol, stock_data, days_to_predict, threshold, "RandomForest", model_params, prediction_params)
+        
+        elif model_type == "Ensemble":
+            try:
+                # Ensemble modeli - çoklu model kombinasyonu
+                from sklearn.ensemble import VotingRegressor, GradientBoostingRegressor
+                
+                # Model listesini hazırla
+                models = []
+                
+                # RandomForest - her zaman ekle
+                rf_params = {
+                    'n_estimators': model_params_optimized.get('n_estimators', 200),
+                    'max_depth': model_params_optimized.get('max_depth', 15),
+                    'min_samples_split': model_params_optimized.get('min_samples_split', 5),
+                    'min_samples_leaf': model_params_optimized.get('min_samples_leaf', 2),
+                    'max_features': model_params_optimized.get('max_features', 'sqrt'),
+                    'random_state': seed_value,
+                    'n_jobs': -1
+                }
+                models.append(('rf', RandomForestRegressor(**rf_params)))
+                
+                # GradientBoosting - her zaman ekle
+                gb_params = {
+                    'n_estimators': model_params_optimized.get('n_estimators', 200),
+                    'max_depth': model_params_optimized.get('max_depth', 8),
+                    'learning_rate': model_params_optimized.get('learning_rate', 0.1),
+                    'random_state': seed_value
+                }
+                models.append(('gb', GradientBoostingRegressor(**gb_params)))
+                
+                # XGBoost - eğer mevcut ise ekle
+                try:
+                    import xgboost as xgb
+                    xgb_params = {
+                        'n_estimators': model_params_optimized.get('n_estimators', 200),
+                        'max_depth': model_params_optimized.get('max_depth', 8),
+                        'learning_rate': model_params_optimized.get('learning_rate', 0.1),
+                        'subsample': model_params_optimized.get('subsample', 0.8),
+                        'colsample_bytree': model_params_optimized.get('colsample_bytree', 0.8),
+                        'random_state': seed_value,
+                        'n_jobs': -1
+                    }
+                    models.append(('xgb', xgb.XGBRegressor(**xgb_params)))
+                    print("DEBUG: XGBoost ensemble'a eklendi")
+                except ImportError:
+                    print("DEBUG: XGBoost mevcut değil, ensemble'a eklenmiyor")
+                
+                # LightGBM - eğer mevcut ise ekle
+                try:
+                    import lightgbm as lgb
+                    lgb_params = {
+                        'n_estimators': model_params_optimized.get('n_estimators', 200),
+                        'num_leaves': model_params_optimized.get('num_leaves', 50),
+                        'learning_rate': model_params_optimized.get('learning_rate', 0.1),
+                        'feature_fraction': model_params_optimized.get('feature_fraction', 0.8),
+                        'bagging_fraction': model_params_optimized.get('bagging_fraction', 0.8),
+                        'random_state': seed_value,
+                        'n_jobs': -1,
+                        'verbose': -1
+                    }
+                    models.append(('lgb', lgb.LGBMRegressor(**lgb_params)))
+                    print("DEBUG: LightGBM ensemble'a eklendi")
+                except ImportError:
+                    print("DEBUG: LightGBM mevcut değil, ensemble'a eklenmiyor")
+                
+                print(f"DEBUG: Ensemble modeli {len(models)} alt model ile oluşturuluyor: {[name for name, _ in models]}")
+                
+                # VotingRegressor ile ensemble oluştur
+                model = VotingRegressor(estimators=models, n_jobs=-1)
+                
+            except Exception as e:
+                print(f"Ensemble model oluşturma hatası: {str(e)}, RandomForest'a geçiliyor...")
+                return ml_price_prediction(stock_symbol, stock_data, days_to_predict, threshold, "RandomForest", model_params, prediction_params)
+        
         else:
-            # Varsayılan: RandomForest
-            n_estimators = model_params.get("n_estimators", 100)
-            max_depth = model_params.get("max_depth", None)
+            # Varsayılan olarak RandomForest kullan
+            print(f"WARNING: Bilinmeyen model tipi '{model_type}', RandomForest kullanılıyor...")
             
-            model = RandomForestRegressor(
-                n_estimators=n_estimators, 
-                max_depth=max_depth, 
-                random_state=42
-            )
+            final_params = {
+                'n_estimators': model_params_optimized.get('n_estimators', 200),
+                'max_depth': model_params_optimized.get('max_depth', 15),
+                'min_samples_split': model_params_optimized.get('min_samples_split', 5),
+                'min_samples_leaf': model_params_optimized.get('min_samples_leaf', 2),
+                'max_features': model_params_optimized.get('max_features', 'sqrt'),
+                'random_state': seed_value,
+                'n_jobs': -1
+            }
+            
+            model = RandomForestRegressor(**final_params)
         
-        # Ensemble ve Hibrit dışındaki modeller için standart eğitim ve tahmin
-        if model_type != "Ensemble":
-            model.fit(X_train, y_train)
-            
-            # Test seti üzerinde değerlendir
-            y_pred = model.predict(X_test)
-            r2 = r2_score(y_test, y_pred)
-            
-            # Sonraki günler için tahminler
-            last_window = scaled_data[-window_size:]
-            future_predictions = []
-            
-            last_window_copy = last_window.copy()
-            
-            # Gelecek günleri tahmin et
-            for _ in range(days_to_predict):
-                next_pred = model.predict(last_window_copy.reshape(1, -1))[0]
-                future_predictions.append(next_pred)
-                last_window_copy = np.append(last_window_copy[1:], next_pred)
-            
-            # Tahminleri gerçek değerlere dönüştür
-            future_pred_reshaped = np.array(future_predictions).reshape(-1, 1)
-            future_pred_prices = scaler.inverse_transform(future_pred_reshaped).flatten()
-            
-            # Hibrit model için uzman ayarlaması
-            if model_type == "Hibrit Model" and 'adjustment_factor' in locals():
-                # Tüm tahmini fiyatları ayarla (uzak gelecek için daha fazla)
-                for i in range(len(future_pred_prices)):
-                    time_factor = (i + 1) / days_to_predict  # Zamanla artan faktör
-                    future_pred_prices[i] *= (1 + adjustment_factor * time_factor)
-            
-            # Tahmin edilen tarihleri oluştur
-            last_date = df.index[-1]
-            future_dates = []
-            
-            for i in range(1, days_to_predict + 1):
-                next_date = last_date + timedelta(days=i)
-                # Hafta sonlarını atla
-                while next_date.weekday() >= 5:  # 5 = Cumartesi, 6 = Pazar
-                    next_date = next_date + timedelta(days=1)
-                future_dates.append(next_date)
-            
-            # Tahminleri DataFrame'e dönüştür
-            predictions_df = pd.DataFrame({
-                'Date': future_dates,
-                'Predicted Price': future_pred_prices
-            })
-            predictions_df.set_index('Date', inplace=True)
+        # Son %20 ile test için train/test ayırma
+        split_index = int(len(X_scaled) * 0.8)
+        X_train, X_test = X_scaled[:split_index], X_scaled[split_index:]
+        y_train, y_test = y[:split_index], y[split_index:]
         
-        # Başarı oranını hesapla
-        success_rate = max(min(r2 * 100, 95), 30)  # %30-%95 arasında sınırla
+        print(f"DEBUG: Final eğitim veri boyutu: {len(X_train)}, Test veri boyutu: {len(X_test)}")
         
-        # Volatilite testi ekle ve tahminleri düzelt
-        last_price = df['Close'].iloc[-1]
-        volatility = df['Close'].pct_change().std() * 100  # Günlük değişim standart sapması
+        # Model eğitimi
+        model.fit(X_train, y_train)
+        y_pred_test = model.predict(X_test)
         
-        # Rastgelelik faktörü ekle
-        for i in range(len(predictions_df)):
-            # Daha yüksek volatilite, daha fazla rastgelelik demektir
-            randomness = random.uniform(-1, 1) * volatility * (i+1) / days_to_predict
-            adjustment = predictions_df['Predicted Price'].iloc[i] * randomness / 100
-            predictions_df['Predicted Price'].iloc[i] += adjustment
+        # Model performansını hesapla
+        r2 = r2_score(y_test, y_pred_test)
+        mse = mean_squared_error(y_test, y_pred_test)
+        rmse = np.sqrt(mse)
+        mae = mean_absolute_error(y_test, y_pred_test)
         
-        # Tahminlerden trend bilgisini çıkar
+        print(f"DEBUG: {model_type} performansı - R²: {r2:.4f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}")
+        
+        # Gelişmiş güven skorunu hesapla
+        confidence = enhanced_confidence_score(
+            y_test, y_pred_test, model_type, data_quality_score, 
+            volatility, walk_forward_scores
+        )
+        
+        # Gelecek tahminleri - sequence prediction
+        future_dates = []
+        future_pred_prices = []
+        
+        # Son veriyi al
+        last_data = X_scaled[-1].reshape(1, -1)
+        current_price = y[-1]
+        
+        # Sequence prediction için sliding window
+        sequence_length = min(10, len(X_scaled))
+        prediction_sequence = X_scaled[-sequence_length:]
+        
+        for i in range(1, days_to_predict + 1):
+            # Bir sonraki iş gününü bul
+            next_date = df.index[-1] + timedelta(days=i)
+            # Hafta sonlarını atla
+            while next_date.weekday() >= 5:  # 5 = Cumartesi, 6 = Pazar
+                next_date = next_date + timedelta(days=1)
+        
+            future_dates.append(next_date)
+            
+            # Tahmin yap
+            prediction = model.predict(last_data)[0]
+            
+            # Volatilite ayarlaması ekle
+            volatility_adjustment = np.random.normal(0, volatility/100/np.sqrt(252)) if prediction_params.get('add_volatility', False) else 0
+            adjusted_prediction = prediction * (1 + volatility_adjustment)
+            
+            future_pred_prices.append(adjusted_prediction)
+            
+            # Son veriyi güncelle (sadece fiyat değişikliği ile)
+            # Bu basit bir yaklaşım, gerçekte yeni teknik göstergeler hesaplanmalı
+            price_change_ratio = adjusted_prediction / current_price
+            last_data = last_data.copy()
+            # Close price feature'ını güncelle (eğer varsa)
+            close_feature_idx = None
+            for idx, feature in enumerate(available_features):
+                if feature == 'Close':
+                    close_feature_idx = idx
+                    break
+            if close_feature_idx is not None:
+                last_data[0, close_feature_idx] *= price_change_ratio
+    
+        # Tahminleri DataFrame'e dönüştür
+        predictions_df = pd.DataFrame({
+            'Date': future_dates,
+            'Predicted Price': future_pred_prices
+        })
+        predictions_df.set_index('Date', inplace=True)
+    
+        # Trend belirleme
         trend = "Yükseliş" if predictions_df['Predicted Price'].iloc[-1] > last_price else "Düşüş"
         
-        # Tahmin güven aralığı
-        confidence = random.uniform(max(30, success_rate-20), min(success_rate+10, 95))
-        
-        # Temel tahmin bilgilerini oluştur
-        prediction_info = {
+        # Sonuç dictionary'si oluştur
+        result = {
             'symbol': stock_symbol,
+            'model_type': model_type,
             'last_price': last_price,
+            'current_price': last_price,
+            'prediction_7d': predictions_df['Predicted Price'].iloc[min(6, len(predictions_df)-1)] if len(predictions_df) >= 7 else predictions_df['Predicted Price'].iloc[-1],
             'prediction_30d': predictions_df['Predicted Price'].iloc[-1] if days_to_predict >= 30 else None,
-            'prediction_7d': predictions_df['Predicted Price'].iloc[6] if days_to_predict >= 7 else None,
             'trend': trend,
             'confidence': confidence,
             'r2_score': r2,
+            'mse': mse,
+            'rmse': rmse,
+            'mae': mae,
+            'volatility': volatility,
             'predictions_df': predictions_df,
-            'model_type': model_type
+            'features_used': available_features,
+            'data_length': len(df),
+            'data_quality_score': data_quality_score,
+            'threshold_used': threshold,
+            'seed_used': seed_value,
+            'walk_forward_scores': walk_forward_scores,
+            'optimized_params': model_params_optimized,
+            'features_count': len(available_features)
         }
         
-        # Grafiği oluştur
-        plt.figure(figsize=(12, 6))
-        plt.plot(df.index[-60:], df['Close'].iloc[-60:], label='Geçmiş Veriler')
-        plt.plot(predictions_df.index, predictions_df['Predicted Price'], label='ML Tahmini', linestyle='--')
-        plt.title(f"{stock_symbol} ML Fiyat Tahmini - {model_type} (Güven: %{confidence:.1f})")
-        plt.xlabel('Tarih')
-        plt.ylabel('Fiyat (TL)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        return prediction_info
+        print(f"SUCCESS: {stock_symbol} - {model_type} başarılı! R²={r2:.4f}, Güven=%{confidence:.1f}, Features={len(available_features)}")
+        return result
         
     except Exception as e:
-        st.error(f"Makine öğrenimi tahmini sırasında hata oluştu: {str(e)}")
+        import traceback
+        print(f"ML fiyat tahmini hatası ({stock_symbol} - {model_type}): {str(e)}")
+        print(traceback.format_exc())
         return None
-
-def ai_market_sentiment():
-    """
-    Piyasa duyarlılığı analizi yapar (yapay sonuçlar üretir)
-    """
-    try:
-        sentiment = {
-            'market_mood': random.choice(['Olumlu', 'Nötr', 'Tedbirli', 'Karışık', 'Olumsuz']),
-            'confidence': random.randint(60, 95),
-            'trend_strength': random.randint(30, 90),
-            'volatility_expectation': random.choice(['Düşük', 'Orta', 'Yüksek']),
-            'overall_recommendation': random.choice(['Al', 'Tut', 'Sat'])
-        }
-        
-        # 'market_mood' anahtarının varlığını kontrol et
-        if 'market_mood' not in sentiment:
-            sentiment['market_mood'] = 'Nötr'  # Varsayılan değer
-        
-        return sentiment
-    except Exception as e:
-        # Hata durumunda varsayılan değerlerle sözlük döndür
-        return {
-            'market_mood': 'Nötr',
-            'confidence': 75,
-            'trend_strength': 50,
-            'volatility_expectation': 'Orta',
-            'overall_recommendation': 'Tut'
-        }
 
 def ai_price_prediction(stock_symbol, stock_data):
     """
     Fiyat tahmini yapar (yapay sonuçlar üretir)
     """
+    # Tutarlı sonuçlar için sabit seed değerini sembole göre ayarla
+    import random
+    seed = sum(ord(c) for c in stock_symbol)
+    random.seed(seed)
+    
     current_price = stock_data['Close'].iloc[-1]
     
     # Fiyat değişim aralığını belirle
@@ -444,9 +1070,9 @@ def ai_technical_interpretation(stock_data, indicators=None):
         indicators = {}
         last_row = stock_data.iloc[-1]
         technical_indicators = [
-            'RSI', 'MACD', 'MACD_Signal', 'SMA_20', 'SMA_50', 'SMA_200',
+            'RSI', 'MACD', 'MACD_Signal', 'SMA20', 'SMA50', 'SMA200',
             'Bollinger_High', 'Bollinger_Middle', 'Bollinger_Low',
-            'Stoch_k', 'Stoch_d', 'Williams_R', 'ADX', 'CCI'
+            'Stoch_%K', 'Stoch_%D', 'Williams_R', 'ADX', 'CCI'
         ]
         
         for indicator in technical_indicators:
@@ -514,9 +1140,9 @@ def ai_technical_interpretation(stock_data, indicators=None):
     }
     
     # SMA Yorumu (20-50-200)
-    sma_20 = indicators.get('SMA_20', "Mevcut değil")
-    sma_50 = indicators.get('SMA_50', "Mevcut değil") 
-    sma_200 = indicators.get('SMA_200', "Mevcut değil")
+    sma_20 = indicators.get('SMA20', "Mevcut değil")
+    sma_50 = indicators.get('SMA50', "Mevcut değil") 
+    sma_200 = indicators.get('SMA200', "Mevcut değil")
     
     if sma_20 != "Mevcut değil" and sma_50 != "Mevcut değil" and sma_200 != "Mevcut değil":
         current_price = stock_data['Close'].iloc[-1]
@@ -550,9 +1176,9 @@ def ai_technical_interpretation(stock_data, indicators=None):
         sma_recommendation = "Belirsiz"
         
     interpretations['SMA'] = {
-        'SMA_20': sma_20,
-        'SMA_50': sma_50,
-        'SMA_200': sma_200,
+        'SMA20': sma_20,
+        'SMA50': sma_50,
+        'SMA200': sma_200,
         'comment': sma_comment,
         'recommendation': sma_recommendation
     }
@@ -722,23 +1348,53 @@ def backtest_models(df_with_indicators, period=30, model_type="RandomForest", te
         }
     
     try:
+        # Tutarlı sonuçlar için sabit seed değeri kullan
+        import numpy as np
+        import random
+        
+        # Sabit seed oluştur - model tipi ve dönem kombinasyonu ile
+        seed_value = sum(ord(c) for c in f"{model_type}_{period}") % 10000
+        np.random.seed(seed_value)
+        random.seed(seed_value)
+        
         # Veri setini hazırla
         df = df_with_indicators.copy()
         
-        # Özellik sütunları ve hedef sütunu
-        feature_columns = [
+        # Özellik sütunları ve hedef sütunu - Hata veren yerde features değişkenini tanımlayalım
+        features = [
             'Open', 'High', 'Low', 'Close', 'Volume',
-            'SMA_5', 'SMA_10', 'SMA_20', 'EMA_5', 'EMA_10', 'EMA_20', 
+            'SMA5', 'SMA10', 'SMA20', 'EMA5', 'EMA10', 'EMA20', 
             'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist', 
             'Upper_Band', 'Middle_Band', 'Lower_Band',
-            'K_Line', 'D_Line', 'ADX'
+            'Stoch_%K', 'Stoch_%D', 'ADX'
         ]
         
         # Eksik feature'lar varsa kaldır
-        features_to_use = [f for f in feature_columns if f in df.columns]
+        features_to_use = [f for f in features if f in df.columns]
         
-        # NaN değerleri temizle
+        # Veri ön işleme iyileştirmesi
+        # NaN değerlerini daha akıllı bir şekilde doldur
+        for col in features_to_use:
+            # Teknik göstergeler
+            if col not in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                # İlk interpolasyon dene
+                df[col] = df[col].interpolate(method='linear').bfill()
+            else:
+                # Fiyat verileri için ffill daha uygun
+                df[col] = df[col].ffill().bfill()
+        
+        # Kalan NaN değerleri temizle
         df = df.dropna()
+        
+        # Yeterli veri kontrolü
+        if len(df) <= test_size + period:
+            return {
+                'error': 'Ön işleme sonrası backtest için yeterli veri kalmadı',
+                'mae': np.nan,
+                'rmse': np.nan,
+                'accuracy': np.nan,
+                'predictions': None
+            }
         
         # Tahmin sonuçlarını saklamak için DataFrame
         predictions_df = pd.DataFrame()
@@ -747,119 +1403,303 @@ def backtest_models(df_with_indicators, period=30, model_type="RandomForest", te
         all_actual_prices = []
         all_predicted_prices = []
         
+        # Zaman serisi çapraz doğrulama
+        from sklearn.model_selection import TimeSeriesSplit
+        tscv = TimeSeriesSplit(n_splits=3)
+        
+        # Modelin ilerleme kontrolü için değişkenler
+        last_percent = 0
+        
         for i in range(test_size):
-            # Test için kullanılacak başlangıç ve bitiş indekslerini belirle
+            # İlerleme durumunu yazdır (her %10'da bir)
+            current_percent = int((i / test_size) * 100)
+            if current_percent % 10 == 0 and current_percent != last_percent:
+                print(f"Backtest ilerleme: %{current_percent} tamamlandı...")
+                last_percent = current_percent
             train_end_idx = len(df) - test_size + i - period
-            
             if train_end_idx <= 0:
                 continue
-                
-            # Eğitim verisi
+            if train_end_idx + period - 1 >= len(df):
+                continue
             train_data = df.iloc[:train_end_idx]
-            
-            # Test verisi (bitiş tarihi)
             actual_date = df.index[train_end_idx + period - 1]
             actual_price = df.iloc[train_end_idx + period - 1]['Close']
-            
-            # Özellik ölçeklendirme
-            scaler = MinMaxScaler()
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
             X_train = scaler.fit_transform(train_data[features_to_use])
-            
-            # Hedef değişken
             y_train = train_data['Close'].values
-            
-            # En son veriler (tahmin için)
             X_last = scaler.transform(df.iloc[train_end_idx - 1:train_end_idx][features_to_use])
-            
-            # Model eğitimi ve tahmin
-            if model_type == "RandomForest":
-                model = RandomForestRegressor(n_estimators=100, random_state=42)
-                model.fit(X_train, y_train)
-                prediction = model.predict(X_last)[0]
-                
-            elif model_type == "XGBoost":
-                model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
-                model.fit(X_train, y_train)
-                prediction = model.predict(X_last)[0]
-                
-            elif model_type == "LightGBM":
-                model = lgb.LGBMRegressor(random_state=42)
-                model.fit(X_train, y_train)
-                prediction = model.predict(X_last)[0]
-                
-            elif model_type == "Ensemble":
-                # Birden fazla modeli birleştir
-                rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-                xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
-                lgb_model = lgb.LGBMRegressor(random_state=42)
-                
-                rf_model.fit(X_train, y_train)
-                xgb_model.fit(X_train, y_train)
-                lgb_model.fit(X_train, y_train)
-                
-                # Tahminleri birleştir
-                rf_pred = rf_model.predict(X_last)[0]
-                xgb_pred = xgb_model.predict(X_last)[0]
-                lgb_pred = lgb_model.predict(X_last)[0]
-                
-                prediction = (rf_pred + xgb_pred + lgb_pred) / 3
-                
-            elif model_type == "Hibrit Model":
-                # Teknik göstergeler ile makine öğrenimi karışımı
-                technical_features = [f for f in [
-                    'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist', 
-                    'Upper_Band', 'Middle_Band', 'Lower_Band', 
-                    'K_Line', 'D_Line', 'ADX'
-                ] if f in features_to_use]
-                
-                price_features = [f for f in ['Open', 'High', 'Low', 'Close', 'Volume'] if f in features_to_use]
-                
-                if technical_features and price_features:
-                    # Fiyat bazlı tahmin
-                    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-                    rf_model.fit(X_train, y_train)
-                    price_pred = rf_model.predict(X_last)[0]
+            try:
+                # Model seçimi ve hiperparametre optimizasyonu
+                if model_type == "RandomForest":
+                    from sklearn.ensemble import RandomForestRegressor
+                    from sklearn.model_selection import RandomizedSearchCV
+                    rf_param_grid = {
+                        'n_estimators': [50, 100, 150, 200],
+                        'max_depth': [5, 8, 10, 15, None],
+                        'min_samples_split': [2, 5, 8],
+                        'min_samples_leaf': [1, 2, 4],
+                        'max_features': ['sqrt', 'log2', None]
+                    }
+                    if len(X_train) > 500:
+                        n_iter = 10
+                    else:
+                        n_iter = 5
+                    base_model = RandomForestRegressor(random_state=42)
+                    grid_search = RandomizedSearchCV(base_model, rf_param_grid, 
+                                                   n_iter=n_iter, cv=tscv, 
+                                                   scoring='neg_mean_squared_error',
+                                                   n_jobs=-1, random_state=42)
+                    grid_search.fit(X_train, y_train)
+                    model = grid_search.best_estimator_
+                    prediction = model.predict(X_last)[0]
+                elif model_type == "XGBoost":
+                    try:
+                        import xgboost as xgb
+                        from sklearn.model_selection import RandomizedSearchCV
+                        xgb_param_grid = {
+                            'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                            'max_depth': [3, 5, 7, 9],
+                            'n_estimators': [50, 100, 200],
+                            'subsample': [0.7, 0.8, 0.9, 1.0],
+                            'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
+                            'min_child_weight': [1, 3, 5],
+                            'gamma': [0, 0.1, 0.2, 0.3]
+                        }
+                        if len(X_train) > 500:
+                            n_iter = 10
+                        else:
+                            n_iter = 5
+                        base_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
+                        grid_search = RandomizedSearchCV(base_model, xgb_param_grid, 
+                                                       n_iter=n_iter, cv=tscv, 
+                                                       scoring='neg_mean_squared_error',
+                                                       n_jobs=-1, random_state=42)
+                        grid_search.fit(X_train, y_train)
+                        model = grid_search.best_estimator_
+                        prediction = model.predict(X_last)[0]
+                    except (ImportError, ModuleNotFoundError):
+                        print("XGBoost kütüphanesi bulunamadı, RandomForest kullanılıyor...")
+                        from sklearn.ensemble import RandomForestRegressor
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X_train, y_train)
+                        prediction = model.predict(X_last)[0]
+                elif model_type == "LightGBM":
+                    try:
+                        import lightgbm as lgb
+                        from sklearn.model_selection import RandomizedSearchCV
+                        lgb_param_grid = {
+                            'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                            'num_leaves': [31, 50, 70, 100],
+                            'n_estimators': [50, 100, 200],
+                            'max_depth': [3, 5, 7, 9, -1],
+                            'subsample': [0.7, 0.8, 0.9, 1.0],
+                            'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
+                            'reg_alpha': [0, 0.1, 0.5, 1.0],
+                            'reg_lambda': [0, 0.1, 0.5, 1.0]
+                        }
+                        if len(X_train) > 500:
+                            n_iter = 10
+                        else:
+                            n_iter = 5
+                        base_model = lgb.LGBMRegressor(random_state=42)
+                        grid_search = RandomizedSearchCV(base_model, lgb_param_grid, 
+                                                       n_iter=n_iter, cv=tscv, 
+                                                       scoring='neg_mean_squared_error',
+                                                       n_jobs=-1, random_state=42)
+                        grid_search.fit(X_train, y_train)
+                        model = grid_search.best_estimator_
+                        prediction = model.predict(X_last)[0]
+                    except (ImportError, ModuleNotFoundError):
+                        print("LightGBM kütüphanesi bulunamadı, RandomForest kullanılıyor...")
+                        from sklearn.ensemble import RandomForestRegressor
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X_train, y_train)
+                        prediction = model.predict(X_last)[0]
+                elif model_type == "Ensemble":
+                    try:
+                        from sklearn.ensemble import RandomForestRegressor, VotingRegressor
+                        import xgboost as xgb
+                        xgb_available = True
+                    except ImportError:
+                        xgb_available = False
                     
-                    # Teknik gösterge ağırlıklı düzeltme
-                    last_price = df.iloc[train_end_idx - 1]['Close']
-                    rsi = df.iloc[train_end_idx - 1]['RSI'] if 'RSI' in df.columns else 50
-                    macd = df.iloc[train_end_idx - 1]['MACD'] if 'MACD' in df.columns else 0
+                    try:
+                        import lightgbm as lgb
+                        lgbm_available = True
+                    except ImportError:
+                        lgbm_available = False
                     
-                    # RSI ve MACD'ye göre ayarlama
-                    rsi_factor = (rsi - 50) / 50  # -1 ile 1 arasında
-                    macd_factor = 1 if macd > 0 else -1
+                    # Veriyi hazırla
+                    X = df[features_to_use].values
+                    y = df['Close'].values
                     
-                    adjust_factor = 0.02 * (rsi_factor + macd_factor) / 2
+                    # Min-Max Ölçekleme
+                    scaler = MinMaxScaler(feature_range=(0, 1))
+                    scaled_data = scaler.fit_transform(X)
                     
-                    # Hibrit tahmin
-                    prediction = price_pred * (1 + adjust_factor)
+                    # Modelleri oluştur
+                    models = []
+                    
+                    # RandomForest her zaman ekle
+                    models.append(('rf', RandomForestRegressor(n_estimators=100, random_state=42)))
+                    
+                    # GradientBoosting her zaman ekle
+                    models.append(('gb', GradientBoostingRegressor(n_estimators=100, random_state=42)))
+                    
+                    # XGBoost varsa ekle
+                    if xgb_available:
+                        models.append(('xgb', xgb.XGBRegressor(n_estimators=100, random_state=42)))
+                    
+                    # LightGBM varsa ekle
+                    if lgbm_available:
+                        models.append(('lgbm', lgb.LGBMRegressor(n_estimators=100, random_state=42)))
+                    
+                    # Ensemble tahmin fonksiyonu
+                    def ensemble_predict(X):
+                        predictions = []
+                        for name, model in models:
+                            predictions.append(model.predict(X))
+                        
+                        # Ortalama tahmin
+                        return np.mean(predictions, axis=0)
+                    
+                    # Zaman serisi çapraz doğrulama
+                    tscv = TimeSeriesSplit(n_splits=5)
+                    y_true = []
+                    y_pred = []
+                    
+                    for train_index, test_index in tscv.split(scaled_data):
+                        X_train, X_test = scaled_data[train_index], scaled_data[test_index]
+                        y_train, y_test = y[train_index], y[test_index]
+                        
+                        # Her modeli eğit
+                        for name, model in models:
+                            model.fit(X_train, y_train)
+                        
+                        # Ensemble tahmin
+                        ensemble_predictions = ensemble_predict(X_test)
+                        y_true.extend(y_test)
+                        y_pred.extend(ensemble_predictions)
+                    
+                    # Son modeli tüm veri ile eğit
+                    for name, model in models:
+                        model.fit(scaled_data, y)
+                    
+                    # Performans metrikleri
+                    mse = mean_squared_error(y_true, y_pred)
+                    r2 = r2_score(y_true, y_pred)
+                    
+                    # Moving window boyutu - Zaman serisi modellemesi için
+                    window_size = 20
+                    
+                    # Gelecek tahminleri
+                    future_dates = []
+                    future_pred_prices = []
+                    
+                    # Son pencereyi al
+                    last_window = scaled_data[-window_size:]
+                    
+                    # Tahmin parametresi period kullanılarak days_to_predict yerine
+                    days_to_predict = period
+                    
+                    # Gelecek günleri tahmin et
+                    for i in range(1, days_to_predict + 1):
+                        # Bir sonraki iş gününü bul
+                        next_date = df.index[-1] + timedelta(days=i)
+                        # Hafta sonlarını atla
+                        while next_date.weekday() >= 5:  # 5 = Cumartesi, 6 = Pazar
+                            next_date = next_date + timedelta(days=1)
+                        
+                        future_dates.append(next_date)
+                        
+                        # Son veriyi al
+                        last_data = last_window[-1].reshape(1, -1)
+                        
+                        # Tahmin yap
+                        prediction = ensemble_predict(last_data)[0]
+                        future_pred_prices.append(prediction)
+                    
+                    # Tahminleri DataFrame'e dönüştür
+                    predictions_df = pd.DataFrame({
+                        'Date': future_dates,
+                        'Predicted Price': future_pred_prices
+                    })
+                    predictions_df.set_index('Date', inplace=True)
+                elif model_type == "Hibrit Model":
+                    try:
+                        from sklearn.ensemble import RandomForestRegressor
+                        rf_model = RandomForestRegressor(n_estimators=150, max_depth=10, random_state=42)
+                        rf_model.fit(X_train, y_train)
+                        base_pred = rf_model.predict(X_last)[0]
+                        rsi_factor = 0
+                        macd_factor = 0
+                        bb_factor = 0
+                        if 'RSI' in df.columns:
+                            last_rsi = df.iloc[train_end_idx - 1]['RSI']
+                            if not pd.isna(last_rsi):
+                                if last_rsi < 30:
+                                    rsi_factor = (30 - last_rsi) / 100
+                                elif last_rsi > 70:
+                                    rsi_factor = (70 - last_rsi) / 100
+                        if 'MACD' in df.columns and 'MACD_Signal' in df.columns:
+                            last_macd = df.iloc[train_end_idx - 1]['MACD']
+                            last_signal = df.iloc[train_end_idx - 1]['MACD_Signal']
+                            if not pd.isna(last_macd) and not pd.isna(last_signal):
+                                macd_diff = (last_macd - last_signal) / 10
+                                macd_factor = max(min(macd_diff, 0.05), -0.05)
+                        if all(band in df.columns for band in ['Upper_Band', 'Middle_Band', 'Lower_Band']):
+                            last_close = df.iloc[train_end_idx - 1]['Close']
+                            upper_band = df.iloc[train_end_idx - 1]['Upper_Band']
+                            lower_band = df.iloc[train_end_idx - 1]['Lower_Band']
+                            middle_band = df.iloc[train_end_idx - 1]['Middle_Band']
+                            if not pd.isna(upper_band) and not pd.isna(lower_band) and not pd.isna(middle_band):
+                                if last_close < middle_band:
+                                    distance_to_lower = max(0.01, (last_close - lower_band) / (middle_band - lower_band))
+                                    bb_factor = 0.03 * (1 - distance_to_lower)
+                                else:
+                                    distance_to_upper = max(0.01, (upper_band - last_close) / (upper_band - middle_band))
+                                    bb_factor = -0.03 * (1 - distance_to_upper)
+                        combined_factor = rsi_factor + macd_factor + bb_factor
+                        combined_factor = max(min(combined_factor, 0.08), -0.08)
+                        prediction = base_pred * (1 + combined_factor)
+                    except Exception as e:
+                        print(f"Hibrit model hatası: {str(e)}, RandomForest kullanılıyor...")
+                        from sklearn.ensemble import RandomForestRegressor
+                        model = RandomForestRegressor(n_estimators=100, random_state=42)
+                        model.fit(X_train, y_train)
+                        prediction = model.predict(X_last)[0]
                 else:
-                    # Yeterli teknik gösterge yoksa standart modeli kullan
+                    from sklearn.ensemble import RandomForestRegressor
                     model = RandomForestRegressor(n_estimators=100, random_state=42)
                     model.fit(X_train, y_train)
                     prediction = model.predict(X_last)[0]
-            else:
-                # Varsayılan olarak RandomForest kullan
-                model = RandomForestRegressor(n_estimators=100, random_state=42)
-                model.fit(X_train, y_train)
-                prediction = model.predict(X_last)[0]
-            
-            # Tahmin ve gerçek değeri kaydet
-            all_actual_prices.append(actual_price)
-            all_predicted_prices.append(prediction)
-            
-            # Sonuçları DataFrame'e ekle
-            predictions_df = pd.concat([predictions_df, pd.DataFrame({
-                'Date': [actual_date],
-                'Actual': [actual_price],
-                'Predicted': [prediction]
-            })])
+                all_actual_prices.append(actual_price)
+                all_predicted_prices.append(prediction)
+                predictions_df = pd.concat([predictions_df, pd.DataFrame({
+                    'Date': [actual_date],
+                    'Actual': [actual_price],
+                    'Predicted': [prediction]
+                })])
+            except Exception as e:
+                import traceback
+                print(f"Backtest iterasyon hatası (i={i}): {str(e)}")
+                print(traceback.format_exc())
+                continue
         
         # Performans metrikleri
         if len(all_actual_prices) > 0:
+            # Temel metrikler
             mae = mean_absolute_error(all_actual_prices, all_predicted_prices)
             rmse = np.sqrt(mean_squared_error(all_actual_prices, all_predicted_prices))
-            r2 = r2_score(all_actual_prices, all_predicted_prices)
+            
+            # R2 skoru güvenlik kontrolü
+            if len(set(all_actual_prices)) > 1:  # Veri çeşitliliği kontrolü
+                r2 = r2_score(all_actual_prices, all_predicted_prices)
+                if r2 < -1:  # Çok kötü R2 değerlerini sınırla
+                    r2 = -1
+            else:
+                r2 = 0  # Tek bir değer varsa R2 hesaplanamaz
             
             # Trend doğruluğu (yön tahmini)
             correct_direction = 0
@@ -872,6 +1712,9 @@ def backtest_models(df_with_indicators, period=30, model_type="RandomForest", te
             
             direction_accuracy = correct_direction / (len(all_actual_prices) - 1) if len(all_actual_prices) > 1 else 0
             
+            # MAPE hesapla (Ortalama Mutlak Yüzde Hata)
+            mape = np.mean(np.abs((np.array(all_actual_prices) - np.array(all_predicted_prices)) / np.array(all_actual_prices))) * 100
+            
             # Sonuçları indexle birlikte döndür
             predictions_df = predictions_df.set_index('Date')
             
@@ -879,8 +1722,10 @@ def backtest_models(df_with_indicators, period=30, model_type="RandomForest", te
                 'mae': mae,
                 'rmse': rmse,
                 'r2': r2,
+                'mape': mape,
                 'accuracy': direction_accuracy,
-                'predictions': predictions_df
+                'predictions': predictions_df,
+                'total_predictions': len(all_actual_prices)
             }
         else:
             return {
@@ -893,7 +1738,7 @@ def backtest_models(df_with_indicators, period=30, model_type="RandomForest", te
             
     except Exception as e:
         import traceback
-        print(f"Backtest hata: {str(e)}")
+        print(f"Backtest ana fonksiyon hatası: {str(e)}")
         print(traceback.format_exc())
         
         return {
@@ -904,7 +1749,7 @@ def backtest_models(df_with_indicators, period=30, model_type="RandomForest", te
             'predictions': None
         } 
 
-def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_update=False):
+def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_update=False, model_version=None):
     """
     Belirli bir hisse için model eğitir ve veritabanına kaydeder.
     
@@ -913,6 +1758,7 @@ def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_up
         stock_data (DataFrame): Hisse verileri
         model_type (str): Model tipi (RandomForest, XGBoost, LightGBM, Ensemble, Hibrit)
         force_update (bool): True ise, mevcut model olsa bile yeniden eğitir
+        model_version (str): Kaydedilecek model versiyonu. Belirtilmezse otomatik atanır.
         
     Returns:
         bool: İşlem başarılıysa True, değilse False
@@ -944,10 +1790,10 @@ def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_up
         # Özellik sütunları
         feature_columns = [
             'Open', 'High', 'Low', 'Close', 'Volume',
-            'SMA_5', 'SMA_10', 'SMA_20', 'EMA_5', 'EMA_10', 'EMA_20', 
+            'SMA5', 'SMA10', 'SMA20', 'EMA5', 'EMA10', 'EMA20', 
             'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist', 
             'Upper_Band', 'Middle_Band', 'Lower_Band',
-            'K_Line', 'D_Line', 'ADX'
+            'Stoch_%K', 'Stoch_%D', 'ADX'
         ]
         
         # Eksik feature'lar varsa kaldır
@@ -960,49 +1806,342 @@ def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_up
         X_train, X_test = X[:train_size], X[train_size:]
         y_train, y_test = y[:train_size], y[train_size:]
         
+        # Zaman serisi çapraz doğrulama için split oluştur
+        from sklearn.model_selection import TimeSeriesSplit
+        tscv = TimeSeriesSplit(n_splits=3)
+        
+        # Hiperparametre optimizasyonu için RandomizedSearchCV kullan
+        from sklearn.model_selection import RandomizedSearchCV
+        
+        # Model eğitim parametrelerini sakla (versiyonlama için)
+        model_params = {}
+        
         # Modeli eğit
         if model_type == "RandomForest":
             from sklearn.ensemble import RandomForestRegressor
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X_train, y_train)
+            
+            # RandomForest için geliştirilmiş parametreler
+            rf_param_grid = {
+                'n_estimators': [50, 100, 200, 300],
+                'max_depth': [3, 5, 7, 10, None],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'max_features': ['sqrt', 'log2', None]
+            }
+            
+            # Parametre optimizasyonu
+            rf_base_model = RandomForestRegressor(random_state=42)
+            grid_search = RandomizedSearchCV(
+                rf_base_model, 
+                rf_param_grid, 
+                n_iter=15, 
+                cv=tscv, 
+                n_jobs=-1, 
+                scoring='neg_mean_squared_error',
+                random_state=42
+            )
+            grid_search.fit(X_train, y_train)
+            model = grid_search.best_estimator_
+            
+            # Model parametrelerini kaydet
+            model_params = {
+                'type': 'RandomForest',
+                'best_params': grid_search.best_params_,
+                'train_size': train_size,
+                'feature_count': len(features_to_use)
+            }
+            
+            print(f"RandomForest en iyi parametreler: {grid_search.best_params_}")
             
         elif model_type == "XGBoost":
-            import xgboost as xgb
-            model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
-            model.fit(X_train, y_train)
-            
+            try:
+                import xgboost as xgb
+                # XGBoost için geliştirilmiş parametreler
+                xgb_param_grid = {
+                    'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                    'max_depth': [3, 5, 7, 9],
+                    'n_estimators': [50, 100, 200, 300],
+                    'subsample': [0.7, 0.8, 0.9, 1.0],
+                    'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
+                    'min_child_weight': [1, 3, 5, 7],
+                    'gamma': [0, 0.1, 0.2, 0.3]
+                }
+                # Parametre optimizasyonu
+                xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
+                grid_search = RandomizedSearchCV(
+                    xgb_model, 
+                    xgb_param_grid, 
+                    n_iter=15, 
+                    cv=tscv, 
+                    n_jobs=-1, 
+                    scoring='neg_mean_squared_error',
+                    random_state=42
+                )
+                grid_search.fit(X_train, y_train)
+                model = grid_search.best_estimator_
+                model.fit(X_train, y_train)
+                # Model parametrelerini kaydet
+                model_params = {
+                    'type': 'XGBoost',
+                    'best_params': grid_search.best_params_,
+                    'train_size': train_size,
+                    'feature_count': len(features_to_use)
+                }
+                print(f"XGBoost en iyi parametreler: {grid_search.best_params_}")
+            except ImportError:
+                # XGBoost yüklü değilse RandomForest kullan
+                print("XGBoost kütüphanesi bulunamadı, RandomForest kullanılıyor.")
+                from sklearn.ensemble import RandomForestRegressor
+                model = RandomForestRegressor(n_estimators=100, random_state=42)
+                model.fit(X_train, y_train)
+                # Model parametrelerini kaydet
+                model_params = {
+                    'type': 'RandomForest (XGBoost fallback)',
+                    'params': {'n_estimators': 100, 'random_state': 42},
+                    'train_size': train_size,
+                    'feature_count': len(features_to_use)
+                }
         elif model_type == "LightGBM":
-            import lightgbm as lgb
-            model = lgb.LGBMRegressor(random_state=42)
-            model.fit(X_train, y_train)
-            
+            try:
+                import lightgbm as lgb
+                # LightGBM için geliştirilmiş parametreler
+                lgb_param_grid = {
+                    'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                    'num_leaves': [31, 50, 70, 100, 150],
+                    'n_estimators': [50, 100, 200, 300],
+                    'max_depth': [3, 5, 7, 9, -1],
+                    'subsample': [0.7, 0.8, 0.9, 1.0],
+                    'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
+                    'reg_alpha': [0, 0.1, 0.5, 1.0],
+                    'reg_lambda': [0, 0.1, 0.5, 1.0]
+                }
+                # Parametre optimizasyonu
+                lgb_model = lgb.LGBMRegressor(random_state=42)
+                grid_search = RandomizedSearchCV(
+                    lgb_model, 
+                    lgb_param_grid, 
+                    n_iter=15, 
+                    cv=tscv, 
+                    n_jobs=-1, 
+                    scoring='neg_mean_squared_error',
+                    random_state=42
+                )
+                grid_search.fit(X_train, y_train)
+                model = grid_search.best_estimator_
+                model.fit(X_train, y_train)
+                # Model parametrelerini kaydet
+                model_params = {
+                    'type': 'LightGBM',
+                    'best_params': grid_search.best_params_,
+                    'train_size': train_size,
+                    'feature_count': len(features_to_use)
+                }
+                print(f"LightGBM en iyi parametreler: {grid_search.best_params_}")
+            except ImportError:
+                # LightGBM yüklü değilse RandomForest kullan
+                print("LightGBM kütüphanesi bulunamadı, RandomForest kullanılıyor.")
+                from sklearn.ensemble import RandomForestRegressor
+                model = RandomForestRegressor(n_estimators=100, random_state=42)
+                model.fit(X_train, y_train)
+                # Model parametrelerini kaydet
+                model_params = {
+                    'type': 'RandomForest (LightGBM fallback)',
+                    'params': {'n_estimators': 100, 'random_state': 42},
+                    'train_size': train_size,
+                    'feature_count': len(features_to_use)
+                }
         elif model_type == "Ensemble":
-            # Birden fazla modeli birleştir
+            # Ensemble için birden fazla model oluştur ve optimize et
             from sklearn.ensemble import RandomForestRegressor, VotingRegressor
-            import xgboost as xgb
-            import lightgbm as lgb
+            import numpy as np
             
-            rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-            xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
-            lgb_model = lgb.LGBMRegressor(random_state=42)
+            models = []
+            weights = []
             
-            model = VotingRegressor([
-                ('rf', rf_model),
-                ('xgb', xgb_model),
-                ('lgb', lgb_model)
-            ])
+            # RandomForest
+            rf_param_grid = {
+                'n_estimators': [50, 100, 200],
+                'max_depth': [3, 5, 7, None]
+            }
+            
+            rf_model = RandomForestRegressor(random_state=42)
+            rf_search = RandomizedSearchCV(
+                rf_model, 
+                rf_param_grid, 
+                n_iter=10, 
+                cv=tscv, 
+                n_jobs=-1, 
+                scoring='neg_mean_squared_error',
+                random_state=42
+            )
+            rf_search.fit(X_train, y_train)
+            rf_best = rf_search.best_estimator_
+            models.append(('rf', rf_best))
+            
+            # XGBoost
+            try:
+                import xgboost as xgb
+                xgb_param_grid = {
+                    'learning_rate': [0.01, 0.05, 0.1],
+                    'max_depth': [3, 5, 7],
+                    'n_estimators': [50, 100, 200]
+                }
+                
+                xgb_model = xgb.XGBRegressor(objective='reg:squarederror', random_state=42)
+                xgb_search = RandomizedSearchCV(
+                    xgb_model, 
+                    xgb_param_grid, 
+                    n_iter=10, 
+                    cv=tscv, 
+                    n_jobs=-1, 
+                    scoring='neg_mean_squared_error',
+                    random_state=42
+                )
+                xgb_search.fit(X_train, y_train)
+                xgb_best = xgb_search.best_estimator_
+                models.append(('xgb', xgb_best))
+                
+                # Modellerin performansına göre ağırlık belirle
+                # Negatif MSE skorları pozitife çevir
+                rf_score = -rf_search.best_score_
+                xgb_score = -xgb_search.best_score_
+                
+                # Ağırlıklandırma: daha düşük hata daha yüksek ağırlık
+                total_score = rf_score + xgb_score
+                rf_weight = 1 - (rf_score / total_score)
+                xgb_weight = 1 - (xgb_score / total_score)
+                
+                weights = [rf_weight, xgb_weight]
+                
+            except ImportError:
+                # XGBoost yoksa sadece RandomForest kullan
+                weights = [1.0]
+                
+            # LightGBM
+            try:
+                import lightgbm as lgb
+                lgb_param_grid = {
+                    'learning_rate': [0.01, 0.05, 0.1],
+                    'num_leaves': [31, 50, 70],
+                    'n_estimators': [50, 100, 200]
+                }
+                
+                lgb_model = lgb.LGBMRegressor(random_state=42)
+                lgb_search = RandomizedSearchCV(
+                    lgb_model, 
+                    lgb_param_grid, 
+                    n_iter=10, 
+                    cv=tscv, 
+                    n_jobs=-1, 
+                    scoring='neg_mean_squared_error',
+                    random_state=42
+                )
+                lgb_search.fit(X_train, y_train)
+                lgb_best = lgb_search.best_estimator_
+                models.append(('lgb', lgb_best))
+                
+                # Ağırlıkları güncelle (LightGBM eklendiyse)
+                if len(weights) > 0:
+                    # Negatif MSE skorunu pozitife çevir
+                    lgb_score = -lgb_search.best_score_
+                    
+                    # Yeni toplam skor hesapla
+                    if 'xgb_score' in locals():
+                        total_score = rf_score + xgb_score + lgb_score
+                        rf_weight = 1 - (rf_score / total_score)
+                        xgb_weight = 1 - (xgb_score / total_score)
+                        lgb_weight = 1 - (lgb_score / total_score)
+                        
+                        weights = [rf_weight, xgb_weight, lgb_weight]
+                    else:
+                        total_score = rf_score + lgb_score
+                        rf_weight = 1 - (rf_score / total_score)
+                        lgb_weight = 1 - (lgb_score / total_score)
+                        
+                        weights = [rf_weight, lgb_weight]
+                
+            except ImportError:
+                # LightGBM yoksa devam et
+                pass
+            
+            # Ağırlıklı Voting Regressor oluştur
+            model = VotingRegressor(estimators=models, weights=weights)
             model.fit(X_train, y_train)
+            
+            # Model parametrelerini kaydet
+            ensemble_params = {
+                'type': 'Ensemble',
+                'models': [m[0] for m in models],
+                'weights': weights,
+                'rf_params': rf_search.best_params_ if 'rf_search' in locals() else None,
+                'xgb_params': xgb_search.best_params_ if 'xgb_search' in locals() else None,
+                'lgb_params': lgb_search.best_params_ if 'lgb_search' in locals() else None,
+                'train_size': train_size,
+                'feature_count': len(features_to_use)
+            }
+            model_params = ensemble_params
+            
+            # Optimizasyon sonuçlarını göster
+            print(f"Ensemble model oluşturuldu:")
+            print(f"- RandomForest en iyi parametreler: {rf_search.best_params_}")
+            if len(models) > 1:
+                print(f"- XGBoost en iyi parametreler: {xgb_search.best_params_ if 'xgb_search' in locals() else 'Kullanılmadı'}")
+            if len(models) > 2:
+                print(f"- LightGBM en iyi parametreler: {lgb_search.best_params_ if 'lgb_search' in locals() else 'Kullanılmadı'}")
+            print(f"- Model ağırlıkları: {weights}")
             
         elif model_type == "Hibrit Model":
+            # Hibrit model: ML + teknik göstergeler
             from sklearn.ensemble import RandomForestRegressor
-            model = RandomForestRegressor(n_estimators=150, max_depth=12, random_state=42)
-            model.fit(X_train, y_train)
+            
+            # RandomForest için geliştirilmiş parametreler
+            rf_param_grid = {
+                'n_estimators': [50, 100, 200, 300],
+                'max_depth': [5, 8, 12, 15, None],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'max_features': ['sqrt', 'log2', None]
+            }
+            
+            # Parametre optimizasyonu
+            rf_base_model = RandomForestRegressor(random_state=42)
+            grid_search = RandomizedSearchCV(
+                rf_base_model, 
+                rf_param_grid, 
+                n_iter=15, 
+                cv=tscv, 
+                n_jobs=-1, 
+                scoring='neg_mean_squared_error',
+                random_state=42
+            )
+            grid_search.fit(X_train, y_train)
+            model = grid_search.best_estimator_
+            
+            # Model parametrelerini kaydet
+            model_params = {
+                'type': 'Hibrit Model',
+                'base_model': 'RandomForest',
+                'best_params': grid_search.best_params_,
+                'train_size': train_size,
+                'feature_count': len(features_to_use),
+                'technical_indicators': [f for f in features_to_use if f not in ['Open', 'High', 'Low', 'Close', 'Volume']]
+            }
+            
+            print(f"Hibrit Model için RandomForest en iyi parametreler: {grid_search.best_params_}")
             
         else:
-            # Varsayılan olarak RandomForest
+            # Bilinmeyen model tipi, varsayılan olarak RandomForest
             from sklearn.ensemble import RandomForestRegressor
             model = RandomForestRegressor(n_estimators=100, random_state=42)
             model.fit(X_train, y_train)
+            
+            # Model parametrelerini kaydet
+            model_params = {
+                'type': 'RandomForest (fallback)',
+                'params': {'n_estimators': 100, 'random_state': 42},
+                'train_size': train_size,
+                'feature_count': len(features_to_use)
+            }
         
         # Model performansını ölç
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -1037,13 +2176,26 @@ def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_up
         pickle.dump(model, model_buffer)
         model_bytes = model_buffer.getvalue()
         
+        # Model parametrelerini performans metriklerine ekle
+        performance_metrics['model_params'] = model_params
+        
+        # Versiyonlama için veri hazırlama tarihini ekle
+        date_info = {
+            'training_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'data_start_date': stock_data.index[0].strftime("%Y-%m-%d") if len(stock_data) > 0 else None,
+            'data_end_date': stock_data.index[-1].strftime("%Y-%m-%d") if len(stock_data) > 0 else None,
+            'data_length': len(stock_data)
+        }
+        performance_metrics['date_info'] = date_info
+        
         # Modeli veritabanına kaydet
         result = save_ml_model(
             symbol=symbol,
             model_type=model_type,
             model_data=model_bytes,
             features_used=features_to_use,
-            performance_metrics=performance_metrics
+            performance_metrics=performance_metrics,
+            model_version=model_version
         )
         
         if result:
@@ -1058,7 +2210,7 @@ def train_and_save_model(symbol, stock_data, model_type="RandomForest", force_up
         traceback.print_exc()
         return False
 
-def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshold=0.03, model_type="RandomForest", use_existing_model=True, model_params=None):
+def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshold=0.03, model_type="RandomForest", use_existing_model=True, model_params=None, model_version=None):
     """
     Veritabanında kayıtlı ML modelini kullanarak fiyat tahmini yapar
     
@@ -1070,6 +2222,7 @@ def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshol
         model_type (str): Model tipi
         use_existing_model (bool): True ise veritabanındaki modeli kullanır, False ise yeni model eğitir
         model_params (dict): Model parametreleri
+        model_version (str): Kullanılacak model versiyonu. Belirtilmezse aktif versiyon kullanılır.
         
     Returns:
         dict: Tahmin sonuçları
@@ -1086,7 +2239,7 @@ def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshol
         
         # Veritabanından model yükleme veya yeni eğitme
         if use_existing_model:
-            model_info = load_ml_model(symbol, model_type)
+            model_info = load_ml_model(symbol, model_type, version=model_version)
             
             if model_info:
                 # Modeli yükle
@@ -1094,7 +2247,9 @@ def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshol
                 model = pickle.loads(model_bytes)
                 features_to_use = model_info['features']
                 
-                print(f"{symbol} için {model_type} modeli veritabanından yüklendi.")
+                # Versiyon bilgisini kontrol et
+                version_str = f", Versiyon: {model_info['model_version']}" if 'model_version' in model_info else ""
+                print(f"{symbol} için {model_type} modeli veritabanından yüklendi{version_str}.")
                 print(f"Son güncelleme: {model_info['last_update_date']}")
                 
                 if 'metrics' in model_info and model_info['metrics']:
@@ -1113,7 +2268,7 @@ def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshol
                     features_to_use = model_info['features']
         else:
             # Her zaman yeni model eğit
-            train_result = train_and_save_model(symbol, stock_data, model_type, force_update=True)
+            train_result = train_and_save_model(symbol, stock_data, model_type, force_update=True, model_version=model_version)
             
             if train_result:
                 # Yeni eğitilen modeli yükle
@@ -1134,7 +2289,7 @@ def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshol
             df = calculate_indicators(df)
         
         # Eksik değerleri doldur
-        df = df.fillna(method='ffill')
+        df = df.ffill()
         
         # Tahminler için son veriyi al
         last_data = df[features_to_use].iloc[-1:].values
@@ -1173,9 +2328,11 @@ def ml_price_prediction_with_db(symbol, stock_data, days_to_predict=30, threshol
             'prediction_7d': last_price * (1 + predicted_change / 4) if days_to_predict >= 7 else None,
             'trend': trend,
             'confidence': confidence,
-            'r2_score': model_info['metrics'].get('r2', 0) if 'metrics' in model_info else 0,
+            'r2_score': r2,
+            'predictions_df': None,
             'model_from_db': True,
-            'last_update': model_info['last_update_date'] if 'last_update_date' in model_info else 'Yeni'
+            'last_update': model_info['last_update_date'] if 'last_update_date' in model_info else 'Yeni',
+            'model_version': model_info.get('model_version', 'v1')
         }
         
         return prediction_info

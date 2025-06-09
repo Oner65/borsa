@@ -13,6 +13,9 @@ from bs4 import BeautifulSoup
 import re
 import importlib.util
 
+# Config sistemi
+from config import ML_MODEL_PARAMS, API_KEYS
+
 # Transformers kütüphanesini try-except içinde import ediyoruz
 try:
     from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
@@ -32,18 +35,27 @@ def display_log_message(message, log_container=None, type="info"):
     if type == "error":
         logger.error(message)
         # UI'da sadece log_container varsa ve expanded=True ise göster
-        if log_container and getattr(log_container, "_expanded", False):
-            log_container.error(message)
+        if log_container:
+            try:
+                log_container.error(message)
+            except:
+                pass  # Expander kapalı olabilir, hata vermemesi için
     elif type == "warning":
         logger.warning(message)
         # UI'da sadece log_container varsa ve expanded=True ise göster
-        if log_container and getattr(log_container, "_expanded", False):
-            log_container.warning(message)
+        if log_container:
+            try:
+                log_container.warning(message)
+            except:
+                pass  # Expander kapalı olabilir, hata vermemesi için
     else:
         logger.info(message)
         # UI'da sadece log_container varsa ve expanded=True ise göster
-        if log_container and getattr(log_container, "_expanded", False):
-            log_container.info(message)
+        if log_container:
+            try:
+                log_container.info(message)
+            except:
+                pass  # Expander kapalı olabilir, hata vermemesi için
 
 # Sentiment analiz modeli - global tanımlama ve lazy loading
 @st.cache_resource
@@ -417,66 +429,6 @@ def analyze_news(url, log_container=None):
                 analysis_content = content[:500]
             else:
                 analysis_content = content
-            
-            # YENİ: Önce eğitilmiş modeli kullanmayı dene
-            try:
-                # AI klasöründeki SentimentAnalyzer sınıfını import et
-                import os
-                import sys
-                
-                # Proje dizinini path'e ekle
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                project_dir = os.path.dirname(script_dir)
-                if project_dir not in sys.path:
-                    sys.path.append(project_dir)
-                
-                # SentimentAnalyzer sınıfını import et
-                from ai.sentiment_analysis import SentimentAnalyzer
-                
-                if log_container:
-                    display_log_message("Eğitilmiş duyarlılık analiz modeli kullanılıyor...", log_container, "info")
-                
-                # Analiz yapacak nesneyi oluştur
-                analyzer = SentimentAnalyzer()
-                
-                # Duyarlılık skorunu hesapla
-                sentiment_score = analyzer.predict_proba([analysis_content])[0]
-                
-                # -1 ile 1 arasındaki skoru 0-1 aralığına normalize et
-                normalized_score = (sentiment_score + 1) / 2
-                
-                # Duyarlılık etiketini belirle
-                sentiment_label = "Olumlu" if normalized_score > 0.65 else ("Olumsuz" if normalized_score < 0.35 else "Nötr")
-                
-                if log_container:
-                    display_log_message(f"Eğitilmiş model analiz sonucu: {sentiment_label} ({normalized_score:.2f})", log_container, "success")
-                
-                # Özet oluştur (basit method)
-                summary = content[:200] + "..." if len(content) > 200 else content
-                
-                # Duyarlılık açıklaması
-                sentiment_explanation = get_sentiment_explanation(normalized_score)
-                
-                # Sonuçları hazırla
-                return {
-                    "success": True,
-                    "title": news_data.get("title", "Başlık Bulunamadı"),
-                    "authors": "Belirtilmemiş",
-                    "publish_date": news_data.get("publish_date", "Belirtilmemiş"),
-                    "content": content,
-                    "sentiment": sentiment_label,
-                    "sentiment_score": normalized_score,
-                    "ai_summary": summary,
-                    "ai_analysis": {
-                        "etki": sentiment_label.lower(),
-                        "etki_sebebi": sentiment_explanation,
-                        "önemli_noktalar": []
-                    }
-                }
-            except Exception as model_error:
-                # Eğitilmiş model kullanılamazsa logla ve diğer yöntemlere devam et
-                if log_container:
-                    display_log_message(f"Eğitilmiş model hatası: {str(model_error)}, alternatif yöntem deneniyor...", log_container, "warning")
                 
             # Duyarlılık analizi yap
             if log_container:
@@ -672,7 +624,9 @@ def render_stock_news_tab():
     col1, col2, col3 = st.columns([3, 1.5, 1])
     
     with col1:
-        stock_symbol = st.text_input("Hisse Senedi Kodu (örn: THYAO)", "THYAO", key="news_stock_symbol")
+        # Config'den default stock al
+        default_stock = ML_MODEL_PARAMS.get("default_stock", "THYAO")
+        stock_symbol = st.text_input("Hisse Senedi Kodu (örn: THYAO)", default_stock, key="news_stock_symbol")
     
     with col2:
         # Haber kaynakları seçimi
@@ -689,7 +643,9 @@ def render_stock_news_tab():
         )
     
     with col3:
-        max_results = st.selectbox("Maksimum Haber", [5, 10, 15, 20], index=1)
+        # Config'den max results seçeneklerini al
+        max_results_options = ML_MODEL_PARAMS.get("max_news_results", [5, 10, 15, 20])
+        max_results = st.selectbox("Maksimum Haber", max_results_options, index=1)
         search_btn = st.button("Haberleri Getir")
     
     # Sonuçlar için container - tüm sonuçları burada göstereceğiz
@@ -1194,15 +1150,15 @@ def render_stock_news_tab():
                     st.subheader("Duyarlılık Zaman Serisi")
                     
                     # Zaman serisi grafiği için verileri hazırla
-                    if not news_df.empty and 'sentiment' in news_df.columns and 'date' in news_df.columns:
+                    if not news_df.empty and 'sentiment' in news_df.columns and 'pub_date' in news_df.columns:
                         try:
                             # Tarih sütununu datetime formatına dönüştür
-                            news_df['date'] = pd.to_datetime(news_df['date'])
+                            news_df['pub_date'] = pd.to_datetime(news_df['pub_date'])
                             
                             # Timezone bilgisini kontrol et ve gerekirse kaldır
-                            if hasattr(news_df['date'].dtype, 'tz') and news_df['date'].dtype.tz is not None:
+                            if hasattr(news_df['pub_date'].dtype, 'tz') and news_df['pub_date'].dtype.tz is not None:
                                 # Timezone bilgisi var, UTC'den dönüştür
-                                news_df['date'] = news_df['date'].dt.tz_localize(None)
+                                news_df['pub_date'] = news_df['pub_date'].dt.tz_localize(None)
                             
                             # Tarihe göre sırala
                             news_df_sorted = news_df.sort_values('date')
@@ -1248,9 +1204,13 @@ def render_stock_news_tab():
                             
                             # Grafik başlığı
                             plt.title(f"{stock_symbol} Hisse Haberleri Duyarlılık Trendi", fontsize=12)
+                            plt.tight_layout()
                             
                             # Streamlit'te göster
                             st.pyplot(fig)
+                            
+                            # Memory leak'i önlemek için figür'ü kapat
+                            plt.close(fig)
                             
                             # Trend analizi
                             if len(news_df_sorted) >= 3:
@@ -1304,9 +1264,13 @@ def render_stock_news_tab():
                                 # Pasta grafiğin görünümünü özelleştir
                                 plt.setp(autotexts, size=10, weight="bold")
                                 ax.set_title(f"{stock_symbol} için Haber Kaynakları Dağılımı", fontsize=14)
+                                plt.tight_layout()
                                 
                                 # Streamlit'te göster
                                 st.pyplot(fig)
+                                
+                                # Memory leak'i önlemek için figür'ü kapat
+                                plt.close(fig)
                             
                             with col2:
                                 # Kaynak sayılarını tablo olarak göster

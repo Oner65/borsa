@@ -340,7 +340,6 @@ def render_analysis_history_tab():
                         # Silme fonksiyonunu çağır (db_utils.py içinde tanımlanmalı)
                         if delete_analysis_result(delete_id):
                             st.success(f"ID: {delete_id} analiz sonucu başarıyla silindi.")
-                            st.experimental_rerun()  # Sayfayı yenile
                         else:
                             st.error(f"ID: {delete_id} analiz sonucu silinirken bir hata oluştu.")
             else:

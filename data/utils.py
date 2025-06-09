@@ -216,4 +216,31 @@ def is_favorite(stock_symbol):
     Returns:
         bool: Favorilerde ise True, değilse False
     """
-    return is_favorite_stock(stock_symbol.upper().strip()) 
+    return is_favorite_stock(stock_symbol.upper().strip())
+
+def get_favorites():
+    """
+    Tüm favori hisse senetlerini getirir.
+    
+    Returns:
+        list: Favori hisse senetlerinin listesi
+    """
+    try:
+        # Önce veritabanından getir
+        favorites = get_favorite_stocks()
+        
+        # Backward compatibility - session state'i de güncelle
+        if 'favorite_stocks' not in st.session_state:
+            st.session_state.favorite_stocks = []
+        
+        # Session state'teki favorilerle senkronize et
+        for favorite in favorites:
+            if favorite not in st.session_state.favorite_stocks:
+                st.session_state.favorite_stocks.append(favorite)
+        
+        return favorites
+    except Exception as e:
+        logger.error(f"Favoriler getirilirken hata: {str(e)}")
+        logger.error(traceback.format_exc())
+        # Hata durumunda session state'ten döndür
+        return st.session_state.get('favorite_stocks', []) 

@@ -7,8 +7,11 @@ import datetime
 import random
 import time
 
-from data.stock_data import get_stock_data
+from data.stock_data import get_stock_data, get_stock_data_cached, get_popular_stocks
 from analysis.indicators import calculate_indicators, get_signals
+from config import (STOCK_ANALYSIS_WINDOWS, RISK_THRESHOLDS, INDICATOR_PARAMS, 
+                   FORECAST_PERIODS, ML_MODEL_PARAMS)
+from utils.error_handler import handle_api_error, handle_analysis_error, log_exception, show_error_message
 
 def render_bist100_tab():
     """
@@ -94,8 +97,18 @@ def render_bist100_tab():
     # Bugünün tarihini al
     today = datetime.datetime.now().strftime("%d.%m.%Y")
     
-    # BIST-100 verilerini al (gerçek veri için)
-    bist100_data = get_stock_data("XU100", "6mo")
+    # BIST-100 verilerini al - Config'den default period kullan
+    try:
+        default_period = FORECAST_PERIODS.get("6ay", {}).get("period", "6mo")
+        bist100_data = get_stock_data_cached("XU100.IS", period=default_period)
+        
+        if bist100_data is None or len(bist100_data) == 0:
+            # Cache'den alamadıysa direkt çekmeyi dene
+            bist100_data = get_stock_data("XU100", default_period)
+            
+    except Exception as e:
+        log_exception(e, "BIST-100 verisi alınırken hata")
+        bist100_data = pd.DataFrame()  # Boş DataFrame oluştur
     
     # Yükleme mesajını kaldır
     loading_container.empty()
@@ -217,13 +230,15 @@ def render_bist100_tab():
                     row=2, col=1
                 )
                 
-                # Grafik düzenlemesi
+                # Grafik düzenlemesi - Config'den boyut ayarlarını al
+                chart_height = ML_MODEL_PARAMS.get("chart_height", 360)
+                
                 fig.update_layout(
                     title=f"BIST-100 Endeksi Teknik Analizi",
                     yaxis_title="Fiyat",
                     xaxis_rangeslider_visible=False,
-                    height=360,  # Daha kompakt yükseklik
-                    margin=dict(l=0, r=0, t=30, b=0),  # Kenar boşluklarını azalt
+                    height=chart_height,
+                    margin=dict(l=0, r=0, t=30, b=0),
                     template="plotly_white"
                 )
                 
@@ -236,36 +251,48 @@ def render_bist100_tab():
             col1, col2 = st.columns(2)
             
             with col1:
-                # En Çok Yükselenler ve Düşenler
+                # En Çok Yükselenler ve Düşenler - Gerçek veri kullan
                 st.subheader("En Çok Yükselenler ve Düşenler")
                 st.caption("Son işlem gününe ait değişim yüzdeleri")
                 
-                # Örnek veri - gerçek uygulamada API'dan alınabilir
-                gainers = {
-                    "KNTTR": random.uniform(5.0, 15.0),
-                    "TATGD": random.uniform(4.0, 12.0),
-                    "KOZAA": random.uniform(3.5, 10.0),
-                    "EREGL": random.uniform(3.0, 8.0),
-                    "THYAO": random.uniform(2.5, 7.0),
-                }
-                
-                losers = {
-                    "VAKBN": random.uniform(-15.0, -5.0),
-                    "ASELS": random.uniform(-12.0, -4.0),
-                    "FROTO": random.uniform(-10.0, -3.5),
-                    "TUPRS": random.uniform(-8.0, -3.0),
-                    "YKBNK": random.uniform(-7.0, -2.5),
-                }
-                
-                gainers_df = pd.DataFrame({
-                    "Hisse": list(gainers.keys()),
-                    "Değişim (%)": list(gainers.values())
-                }).sort_values("Değişim (%)", ascending=False)
-                
-                losers_df = pd.DataFrame({
-                    "Hisse": list(losers.keys()),
-                    "Değişim (%)": list(losers.values())
-                }).sort_values("Değişim (%)")
+                try:
+                    # Popüler hisseleri al ve performanslarını hesapla
+                    popular_stocks_data = get_popular_stocks()
+                    
+                    if popular_stocks_data and len(popular_stocks_data) > 0:
+                        # Performans verilerini sırala
+                        gainers = {}
+                        losers = {}
+                        
+                        for stock in popular_stocks_data:
+                            symbol = stock.get('symbol', '')
+                            change_pct = stock.get('change_percent', 0)
+                            
+                            if change_pct > 0:
+                                gainers[symbol] = change_pct
+                            elif change_pct < 0:
+                                losers[symbol] = change_pct
+                    else:
+                        # Veri alınamadıysa simüle edilmiş veri kullan
+                        gainers = {
+                            "KNTTR": random.uniform(2.0, 8.0),
+                            "TATGD": random.uniform(1.5, 6.0),
+                            "KOZAA": random.uniform(1.0, 5.0),
+                            "EREGL": random.uniform(0.5, 4.0),
+                            "THYAO": random.uniform(0.2, 3.0),
+                        }
+                        losers = {
+                            "VAKBN": random.uniform(-8.0, -2.0),
+                            "ASELS": random.uniform(-6.0, -1.5),
+                            "FROTO": random.uniform(-5.0, -1.0),
+                            "TUPRS": random.uniform(-4.0, -0.5),
+                            "YKBNK": random.uniform(-3.0, -0.2),
+                        }
+                except Exception as e:
+                    log_exception(e, "Popüler hisse verileri alınırken hata")
+                    # Hata durumunda varsayılan veriler
+                    gainers = {"THYAO": 2.5, "ASELS": 1.8, "GARAN": 1.2}
+                    losers = {"VAKBN": -2.1, "FROTO": -1.5, "TUPRS": -0.8}
                 
                 # İki sütunlu yapıyı CSS grid ile oluştur
                 st.markdown("""
@@ -282,12 +309,12 @@ def render_bist100_tab():
                 # İçerik için tablo yapısı oluştur - sütun kullanımından kaçınıyoruz
                 # Yükselenler ve düşenler listesini hazırla
                 gainers_html = ""
-                for i, row in gainers_df.iterrows():
-                    gainers_html += f"<div><b>{row['Hisse']}</b> <span style='float: right; color: green; font-weight: bold;'>+{row['Değişim (%)']:.2f}%</span></div>"
+                for i, row in gainers.items():
+                    gainers_html += f"<div><b>{i}</b> <span style='float: right; color: green; font-weight: bold;'>+{row:.2f}%</span></div>"
                 
                 losers_html = ""
-                for i, row in losers_df.iterrows():
-                    losers_html += f"<div><b>{row['Hisse']}</b> <span style='float: right; color: red; font-weight: bold;'>{row['Değişim (%)']:.2f}%</span></div>"
+                for i, row in losers.items():
+                    losers_html += f"<div><b>{i}</b> <span style='float: right; color: red; font-weight: bold;'>{row:.2f}%</span></div>"
                 
                 # İki sütunlu tablo yapısı oluştur
                 st.markdown(f"""
@@ -308,18 +335,32 @@ def render_bist100_tab():
                 st.subheader("Sektör Performans Analizi")
                 st.caption("Sektörlerin günlük değişim yüzdeleri")
                 
-                # Örnek veri - gerçek uygulamada API'dan alınabilir
-                sectors = {
-                    "Bankacılık": random.uniform(-3.5, 5.0),
-                    "Holding": random.uniform(-2.5, 4.0),
-                    "Sanayi": random.uniform(-2.0, 3.5),
-                    "Teknoloji": random.uniform(-1.5, 6.0),
-                    "Perakende": random.uniform(-3.0, 3.0),
-                    "Enerji": random.uniform(-2.8, 4.5),
-                    "Ulaşım": random.uniform(-3.2, 3.8),
-                    "Gayrimenkul": random.uniform(-4.0, 2.5),
-                    "Madencilik": random.uniform(-2.0, 5.5),
-                }
+                try:
+                    # BIST-100 değişimini baz alarak sektör performansını simüle et
+                    bist_change = bist100_change if 'bist100_change' in locals() else 0
+                    
+                    # Sektör performansları BIST-100 değişimine göre ayarlanır
+                    sectors = {
+                        "Bankacılık": bist_change + random.uniform(-1.5, 1.5),
+                        "Holding": bist_change + random.uniform(-1.0, 1.0),
+                        "Sanayi": bist_change + random.uniform(-0.8, 0.8),
+                        "Teknoloji": bist_change + random.uniform(-2.0, 2.0),
+                        "Perakende": bist_change + random.uniform(-1.2, 1.2),
+                        "Enerji": bist_change + random.uniform(-1.8, 1.8),
+                        "Ulaşım": bist_change + random.uniform(-1.3, 1.3),
+                        "Gayrimenkul": bist_change + random.uniform(-2.2, 1.0),
+                        "Madencilik": bist_change + random.uniform(-1.5, 2.5),
+                    }
+                except Exception as e:
+                    log_exception(e, "Sektör performansı hesaplanırken hata")
+                    # Hata durumunda varsayılan veriler
+                    sectors = {
+                        "Bankacılık": 0.5,
+                        "Holding": -0.2,
+                        "Sanayi": 0.8,
+                        "Teknoloji": 1.2,
+                        "Perakende": -0.5,
+                    }
                 
                 sector_df = pd.DataFrame({
                     "Sektör": list(sectors.keys()),
@@ -344,7 +385,7 @@ def render_bist100_tab():
                 fig.update_layout(
                     title=None,
                     margin=dict(l=0, r=0, t=10, b=0),
-                    height=230,
+                    height=ML_MODEL_PARAMS.get("sector_chart_height", 230),
                     template="plotly_white"
                 )
                 
@@ -364,30 +405,33 @@ def render_bist100_tab():
             with col_signals:
                 st.markdown("##### Teknik Gösterge Sinyalleri")
                 
-                # Son sinyalleri göster
+                # Son sinyalleri göster - Config'den eşikleri kullan
+                rsi_period = INDICATOR_PARAMS["rsi_period"]
+                sma_periods = INDICATOR_PARAMS["sma_periods"]
+                
                 signals_data = {
                     "Gösterge": [
-                        "SMA20 vs SMA50", 
-                        "SMA50 vs SMA200", 
-                        "RSI(14)", 
+                        f"SMA{sma_periods[2]} vs SMA{sma_periods[3]}", 
+                        f"SMA{sma_periods[3]} vs SMA{sma_periods[5]}", 
+                        f"RSI({rsi_period})", 
                         "MACD", 
                         "Stokastik",
                         "Bollinger Bant"
                     ],
                     "Değer": [
-                        f"{bist100_data['SMA20'].iloc[-1]:.0f} vs {bist100_data['SMA50'].iloc[-1]:.0f}",
-                        f"{bist100_data['SMA50'].iloc[-1]:.0f} vs {bist100_data['SMA200'].iloc[-1]:.0f}",
+                        f"{bist100_data[f'SMA{sma_periods[2]}'].iloc[-1]:.0f} vs {bist100_data[f'SMA{sma_periods[3]}'].iloc[-1]:.0f}",
+                        f"{bist100_data[f'SMA{sma_periods[3]}'].iloc[-1]:.0f} vs {bist100_data[f'SMA{sma_periods[5]}'].iloc[-1]:.0f}",
                         f"{bist100_data['RSI'].iloc[-1]:.2f}",
                         f"{bist100_data['MACD'].iloc[-1]:.2f}",
                         f"{bist100_data['Stoch_%K'].iloc[-1]:.2f}",
                         f"{bist100_data['Close'].iloc[-1]:.0f} ({bist100_data['Middle_Band'].iloc[-1]:.0f})"
                     ],
                     "Sinyal": [
-                        "AL" if bist100_data['SMA20'].iloc[-1] > bist100_data['SMA50'].iloc[-1] else "SAT",
-                        "AL" if bist100_data['SMA50'].iloc[-1] > bist100_data['SMA200'].iloc[-1] else "SAT",
-                        "AL" if 30 <= bist100_data['RSI'].iloc[-1] <= 50 else ("SAT" if bist100_data['RSI'].iloc[-1] > 70 else "NÖTR"),
+                        "AL" if bist100_data[f'SMA{sma_periods[2]}'].iloc[-1] > bist100_data[f'SMA{sma_periods[3]}'].iloc[-1] else "SAT",
+                        "AL" if bist100_data[f'SMA{sma_periods[3]}'].iloc[-1] > bist100_data[f'SMA{sma_periods[5]}'].iloc[-1] else "SAT",
+                        "AL" if RISK_THRESHOLDS["low"] * 10 <= bist100_data['RSI'].iloc[-1] <= 50 else ("SAT" if bist100_data['RSI'].iloc[-1] > 70 else "NÖTR"),
                         "AL" if bist100_data['MACD'].iloc[-1] > bist100_data['MACD_Signal'].iloc[-1] else "SAT",
-                        "AL" if bist100_data['Stoch_%K'].iloc[-1] < 20 else ("SAT" if bist100_data['Stoch_%K'].iloc[-1] > 80 else "NÖTR"),
+                        "AL" if bist100_data['Stoch_%K'].iloc[-1] < RISK_THRESHOLDS["low"] * 10 else ("SAT" if bist100_data['Stoch_%K'].iloc[-1] > 80 else "NÖTR"),
                         "AL" if bist100_data['Close'].iloc[-1] < bist100_data['Middle_Band'].iloc[-1] else "SAT"
                     ]
                 }
@@ -407,8 +451,11 @@ def render_bist100_tab():
             with col_summary:
                 st.markdown("##### Piyasa Özeti")
                 
-                # Piyasa özeti ve trend bilgisi
-                ma_trend = "Yükseliş Trendi" if bist100_data['SMA50'].iloc[-1] > bist100_data['SMA200'].iloc[-1] else "Düşüş Trendi"
+                # Piyasa özeti ve trend bilgisi - Config parametrelerini kullan
+                sma_medium = f'SMA{sma_periods[3]}'  # SMA50
+                sma_long = f'SMA{sma_periods[5]}'    # SMA200
+                
+                ma_trend = "Yükseliş Trendi" if bist100_data[sma_medium].iloc[-1] > bist100_data[sma_long].iloc[-1] else "Düşüş Trendi"
                 ma_color = "green" if ma_trend == "Yükseliş Trendi" else "red"
                 
                 st.markdown(f"<h4 style='text-align: center; color: {ma_color};'>{ma_trend}</h4>", unsafe_allow_html=True)
@@ -444,8 +491,8 @@ def render_bist100_tab():
                 ))
                 
                 fig.update_layout(
-                    height=130,  # Daha kompakt yükseklik
-                    margin=dict(l=5, r=5, t=5, b=5),  # Kenar boşluklarını azalt
+                    height=ML_MODEL_PARAMS.get("summary_chart_height", 130),
+                    margin=dict(l=5, r=5, t=5, b=5),
                     template="plotly_white"
                 )
                 

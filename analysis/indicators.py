@@ -181,6 +181,12 @@ def calculate_indicators(df):
     df['Stoch_%K'] = k
     df['Stoch_%D'] = d
     
+    # --- YENİ: Ekstra Teknik Göstergeler ---
+    df['CCI'] = calculate_cci(df)
+    df['Ultimate_Osc'] = calculate_ultimate_oscillator(df)
+    df['StochRSI_K'], df['StochRSI_D'] = calculate_stoch_rsi(df)
+    df['Bull_Power'], df['Bear_Power'] = calculate_bull_bear_power(df)
+    
     # Trend Göstergeleri
     adx, plus_di, minus_di = calculate_adx(df)
     df['ADX'] = adx
@@ -193,6 +199,24 @@ def calculate_indicators(df):
     # Hacim Göstergeleri
     if 'Volume' in df.columns:
         df['Volume_SMA20'] = calculate_sma(df['Volume'], 20)
+        for window in [5, 10, 20]:
+            df[f'Volume_rolling{window}_mean'] = df['Volume'].rolling(window).mean()
+            df[f'Volume_rolling{window}_std'] = df['Volume'].rolling(window).std()
+    
+    # --- YENİ: Lagged ve Rolling Özellikler ---
+    for lag in [1, 3, 5, 10]:
+        df[f'Close_lag{lag}'] = df['Close'].shift(lag)
+        df[f'RSI_lag{lag}'] = df['RSI'].shift(lag)
+        df[f'Volume_lag{lag}'] = df['Volume'].shift(lag) if 'Volume' in df.columns else None
+    for window in [5, 10]:
+        df[f'Close_rolling{window}_mean'] = df['Close'].rolling(window).mean()
+        df[f'Close_rolling{window}_std'] = df['Close'].rolling(window).std()
+        df[f'Close_rolling{window}_min'] = df['Close'].rolling(window).min()
+        df[f'Close_rolling{window}_max'] = df['Close'].rolling(window).max()
+        if 'Volume' in df.columns:
+            df[f'Volume_rolling{window}_mean'] = df['Volume'].rolling(window).mean()
+            df[f'Volume_rolling{window}_std'] = df['Volume'].rolling(window).std()
+    # --- SON ---
     
     return df
 
