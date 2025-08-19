@@ -52,8 +52,9 @@ if 'analysis_history' not in st.session_state:
     st.session_state.analysis_history = []
 
 # Yardımcı fonksiyonlar
+@st.cache_data(ttl=300)  # 5 dakika cache
 def get_stock_data(symbol, period="1y"):
-    """Hisse senedi verilerini al"""
+    """Hisse senedi verilerini al - Cache'li versiyon"""
     try:
         # Türk hisseler için .IS ekle
         if not symbol.endswith('.IS'):
@@ -71,8 +72,9 @@ def get_stock_data(symbol, period="1y"):
         logger.error(f"Veri alınırken hata: {e}")
         return pd.DataFrame()
 
+@st.cache_data(ttl=600)  # 10 dakika cache (teknik göstergeler için)
 def calculate_indicators(df):
-    """Temel teknik göstergeleri hesapla"""
+    """Temel teknik göstergeleri hesapla - Cache'li versiyon"""
     if df.empty:
         return df
     
@@ -100,8 +102,9 @@ def calculate_indicators(df):
         logger.error(f"Göstergeler hesaplanırken hata: {e}")
         return df
 
+@st.cache_data(ttl=300)  # 5 dakika cache
 def create_stock_chart(df, symbol):
-    """Basit hisse senedi grafiği oluştur"""
+    """Basit hisse senedi grafiği oluştur - Cache'li versiyon"""
     try:
         fig = make_subplots(
             rows=2, cols=1,
@@ -209,6 +212,43 @@ def render_simple_bist100_tab():
                         """, unsafe_allow_html=True)
     else:
         st.error("BIST-100 verileri alınamadı")
+
+# Cache'li yardımcı fonksiyonlar
+@st.cache_data(ttl=300)  # 5 dakika cache
+def analyze_stock_performance(symbol, period="1y"):
+    """Hisse senedi performans analizi - Cache'li versiyon"""
+    try:
+        df = get_stock_data(symbol, period)
+        if df.empty:
+            return None
+        
+        df = calculate_indicators(df)
+        
+        # Performans metrikleri
+        last_price = df['Close'].iloc[-1]
+        first_price = df['Close'].iloc[0]
+        total_return = ((last_price - first_price) / first_price) * 100
+        
+        # Volatilite
+        returns = df['Close'].pct_change().dropna()
+        volatility = returns.std() * (252 ** 0.5) * 100  # Yıllık volatilite
+        
+        # Sharpe benzeri metrik
+        risk_free_rate = 15  # Türkiye için yaklaşık risk-free oran
+        excess_return = total_return - risk_free_rate
+        sharpe_like = excess_return / volatility if volatility > 0 else 0
+        
+        return {
+            'symbol': symbol,
+            'last_price': last_price,
+            'total_return': total_return,
+            'volatility': volatility,
+            'sharpe_like': sharpe_like,
+            'df': df
+        }
+    except Exception as e:
+        logger.error(f"Performans analizi hatası: {e}")
+        return None
 
 def render_simple_stock_tab():
     """Basit hisse analizi sekmesi"""
