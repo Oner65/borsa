@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import requests
 import numpy as np
 
-@st.cache_data(ttl=3600) # Veriyi 1 saat cache'le
+@st.cache_data(ttl=300) # Veriyi 5 dakika cache'le (daha sık güncelleme)
 def get_stock_data_cached(symbol, period="1y", interval="1d"):
     """
     Belirtilen sembolün hisse senedi verilerini cache'leyerek alır.
@@ -23,10 +23,62 @@ def get_stock_data_cached(symbol, period="1y", interval="1d"):
         
         # Veri boş değilse, başarıyla verileri aldık demektir
         if len(data) > 0:
+            # GERÇEK ZAMANLI FİYAT GÜNCELLEMESİ EKLE
+            try:
+                # İlk önce fast_info ile dene (daha hızlı)
+                try:
+                    fast_info = stock.fast_info
+                    if hasattr(fast_info, 'last_price') and fast_info.last_price is not None:
+                        current_market_price = fast_info.last_price
+                        print(f"Anlık fiyat (fast_info) - {symbol}: {current_market_price}")
+                        # En son veri noktasının Close değerini güncelle
+                        data.loc[data.index[-1], 'Close'] = current_market_price
+                    else:
+                        raise Exception("fast_info kullanılamadı")
+                except:
+                    # fast_info çalışmazsa info ile dene
+                    info = stock.info
+                    current_price_keys = ['regularMarketPrice', 'currentPrice', 'previousClose']
+                    current_market_price = None
+                    
+                    for key in current_price_keys:
+                        if key in info and info[key] is not None and info[key] > 0:
+                            current_market_price = info[key]
+                            print(f"Anlık fiyat ({key}) - {symbol}: {current_market_price}")
+                            break
+                    
+                    if current_market_price:
+                        # En son veri noktasının Close değerini güncelle
+                        data.loc[data.index[-1], 'Close'] = current_market_price
+                        # High ve Low değerlerini de kontrol et
+                        last_high = data.loc[data.index[-1], 'High']
+                        last_low = data.loc[data.index[-1], 'Low']
+                        
+                        # Current price, high'tan büyükse high'ı güncelle
+                        if current_market_price > last_high:
+                            data.loc[data.index[-1], 'High'] = current_market_price
+                        
+                        # Current price, low'dan küçükse low'ı güncelle
+                        if current_market_price < last_low:
+                            data.loc[data.index[-1], 'Low'] = current_market_price
+            except Exception as price_e:
+                print(f"Anlık fiyat güncelleme hatası - {symbol}: {str(price_e)}")
+            
             print(f"Gerçek veri alındı: {symbol}")
             return data
             
-        # Veri boşsa, simüle edilmiş veriyi döndür
+        # Veri boşsa, farklı periyotları dene
+        for backup_period in ["1y", "6mo", "3mo", "1mo", "5d"]:
+            if backup_period != period:
+                try:
+                    data = stock.history(period=backup_period, interval=interval)
+                    if not data.empty:
+                        print(f"Yedek periyot kullanıldı - {symbol}: {backup_period}")
+                        return data
+                except:
+                    continue
+        
+        # Hiçbir periyotta veri alınamazsa simüle edilmiş veriyi döndür
         print(f"Gerçek veri alınamadı, simülasyon kullanılıyor: {symbol}")
         return get_simulated_stock_data(symbol, period, interval)
             
@@ -338,158 +390,208 @@ def get_company_info(symbol):
     # Hata durumunda boş sözlük döndür
     return {} 
 
-@st.cache_data(ttl=300)  # 5 dakika cachele
+@st.cache_data(ttl=300)  # 5 dakika cachele (daha sık güncelleme)
 def get_market_summary():
     """
-    Piyasa özeti verilerini çeker:
-    - BIST100 Endeksi
-    - USD/TRY Kuru
-    - ALTIN/ONS Fiyatı
-    
-    Returns:
-        dict: Piyasa özet verileri
+    Piyasa özeti verilerini alır
     """
-    market_data = {
-        "bist100": {"symbol": "XU100.IS", "name": "BIST100", "value": 0, "change": 0, "change_percent": 0, "volume": 0, "status": "nötr"},
-        "usdtry": {"symbol": "USDTRY=X", "name": "USD/TRY", "value": 0, "change": 0, "change_percent": 0, "range": "0-0", "status": "nötr"},
-        "gold": {"symbol": "GC=F", "name": "ALTIN/ONS", "value": 0, "change": 0, "change_percent": 0, "range": "0-0", "status": "nötr"}
-    }
-    
     try:
-        # BIST100 verilerini al
+        # BIST 100 endeks verileri
         bist100 = yf.Ticker("XU100.IS")
-        bist100_info = bist100.history(period="2d")
+        bist100_data = bist100.history(period="2d")
         
-        if not bist100_info.empty:
-            # Bugün ve dün kapaış fiyatları
-            current_close = bist100_info['Close'].iloc[-1]
-            prev_close = bist100_info['Close'].iloc[-2] if len(bist100_info) > 1 else current_close
-            
-            change = current_close - prev_close
-            change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
-            
-            # Durum belirleme (yükseliş, düşüş veya nötr)
-            status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "nötr")
-            
-            # Hacim hesaplama (Milyon TL)
-            volume = bist100_info['Volume'].iloc[-1] / 1_000_000 if 'Volume' in bist100_info else 0
-            
-            market_data["bist100"].update({
-                "value": round(current_close, 2),
-                "change": round(change, 2),
-                "change_percent": round(change_percent, 2),
-                "volume": round(volume, 1),
-                "status": status
-            })
-    except Exception as e:
-        print(f"BIST100 verisi alınırken hata: {e}")
-    
-    try:
-        # USD/TRY verilerini al
+        # USD/TRY verileri
         usdtry = yf.Ticker("USDTRY=X")
-        usdtry_info = usdtry.history(period="2d")
+        usdtry_data = usdtry.history(period="2d")
         
-        if not usdtry_info.empty:
-            current_close = usdtry_info['Close'].iloc[-1]
-            prev_close = usdtry_info['Close'].iloc[-2] if len(usdtry_info) > 1 else current_close
-            
-            change = current_close - prev_close
-            change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
-            
-            # Durum belirleme
-            status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "nötr")
-            
-            # 24 saat aralığı hesaplama
-            day_high = usdtry_info['High'].max()
-            day_low = usdtry_info['Low'].min()
-            range_str = f"{day_low:.2f}-{day_high:.2f}"
-            
-            market_data["usdtry"].update({
-                "value": round(current_close, 2),
-                "change": round(change, 2),
-                "change_percent": round(change_percent, 2),
-                "range": range_str,
-                "status": status
-            })
-    except Exception as e:
-        print(f"USD/TRY verisi alınırken hata: {e}")
-    
-    try:
-        # Altın/Ons verilerini al
+        # Altın verileri
         gold = yf.Ticker("GC=F")
-        gold_info = gold.history(period="2d")
+        gold_data = gold.history(period="2d")
         
-        if not gold_info.empty:
-            current_close = gold_info['Close'].iloc[-1]
-            prev_close = gold_info['Close'].iloc[-2] if len(gold_info) > 1 else current_close
+        result = {}
+        
+        # BIST 100 verilerini işle
+        if not bist100_data.empty and len(bist100_data) >= 2:
+            current_price = bist100_data["Close"].iloc[-1]
+            prev_close = bist100_data["Close"].iloc[-2]
+            change = current_price - prev_close
+            change_percent = (change / prev_close) * 100
+            volume = bist100_data["Volume"].iloc[-1] if "Volume" in bist100_data.columns else 0
             
-            change = current_close - prev_close
-            change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
+            status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "sabit")
             
-            # Durum belirleme
-            status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "nötr")
-            
-            # 24 saat aralığı hesaplama
-            day_high = gold_info['High'].max()
-            day_low = gold_info['Low'].min()
-            range_str = f"{int(day_low)}-{int(day_high)}"
-            
-            market_data["gold"].update({
-                "value": round(current_close, 1),
-                "change": round(change, 1),
-                "change_percent": round(change_percent, 2),
-                "range": range_str,
+            result["bist100"] = {
+                "value": current_price,
+                "change": change,
+                "change_percent": change_percent,
+                "volume": volume / 1e9,  # Milyar TL cinsinden
                 "status": status
-            })
+            }
+        else:
+            result["bist100"] = {
+                "value": 0,
+                "change": 0,
+                "change_percent": 0,
+                "volume": 0,
+                "status": "sabit"
+            }
+        
+        # USD/TRY verilerini işle
+        if not usdtry_data.empty and len(usdtry_data) >= 2:
+            current_price = usdtry_data["Close"].iloc[-1]
+            prev_close = usdtry_data["Close"].iloc[-2]
+            change = current_price - prev_close
+            change_percent = (change / prev_close) * 100
+            high = usdtry_data["High"].iloc[-1]
+            low = usdtry_data["Low"].iloc[-1]
+            
+            status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "sabit")
+            
+            result["usdtry"] = {
+                "value": current_price,
+                "change": change,
+                "change_percent": change_percent,
+                "range": f"{low:.2f} - {high:.2f}",
+                "status": status
+            }
+        else:
+            result["usdtry"] = {
+                "value": 0,
+                "change": 0,
+                "change_percent": 0,
+                "range": "0.00 - 0.00",
+                "status": "sabit"
+            }
+        
+        # Altın verilerini işle
+        if not gold_data.empty and len(gold_data) >= 2:
+            current_price = gold_data["Close"].iloc[-1]
+            prev_close = gold_data["Close"].iloc[-2]
+            change = current_price - prev_close
+            change_percent = (change / prev_close) * 100
+            high = gold_data["High"].iloc[-1]
+            low = gold_data["Low"].iloc[-1]
+            
+            status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "sabit")
+            
+            result["gold"] = {
+                "value": current_price,
+                "change": change,
+                "change_percent": change_percent,
+                "range": f"{low:.1f} - {high:.1f}",
+                "status": status
+            }
+        else:
+            result["gold"] = {
+                "value": 0,
+                "change": 0,
+                "change_percent": 0,
+                "range": "0.0 - 0.0",
+                "status": "sabit"
+            }
+        
+        return result
+        
     except Exception as e:
-        print(f"Altın/Ons verisi alınırken hata: {e}")
-    
-    return market_data
+        # Hata durumunda varsayılan değerler döndür
+        return {
+            "bist100": {
+                "value": 0,
+                "change": 0,
+                "change_percent": 0,
+                "volume": 0,
+                "status": "sabit"
+            },
+            "usdtry": {
+                "value": 0,
+                "change": 0,
+                "change_percent": 0,
+                "range": "0.00 - 0.00",
+                "status": "sabit"
+            },
+            "gold": {
+                "value": 0,
+                "change": 0,
+                "change_percent": 0,
+                "range": "0.0 - 0.0",
+                "status": "sabit"
+            },
+            "error": f"Piyasa özeti alınamadı: {str(e)}"
+        }
 
-@st.cache_data(ttl=600)  # 10 dakika cachele
+@st.cache_data(ttl=300)  # 5 dakika cachele (daha sık güncelleme)
 def get_popular_stocks():
     """
-    BIST'teki popüler hisselerin son verilerini getirir
-    
-    Returns:
-        list: Popüler hisselerin güncel verileri
+    Popüler hisselerin detaylı verilerini döndürür
     """
-    popular_symbols = ["THYAO", "ASELS", "GARAN", "SASA", "KCHOL"]
-    popular_data = []
+    popular_stocks_symbols = [
+        "THYAO", "GARAN", "ASELS", "SISE", "AKBNK", "TCELL", "EREGL", "KCHOL",
+        "VAKBN", "PETKM", "BIMAS", "TUPRS", "SAHOL", "HALKB", "ISCTR", "KOZAA",
+        "PGSUS", "ARCLK", "DOHOL", "GUBRF"
+    ]
     
-    for symbol in popular_symbols:
+    # Hisse isimlerini tanımla
+    stock_names = {
+        "THYAO": "Türk Hava Yolları",
+        "GARAN": "Garanti BBVA",
+        "ASELS": "Aselsan",
+        "SISE": "Şişe Cam",
+        "AKBNK": "Akbank",
+        "TCELL": "Turkcell",
+        "EREGL": "Erdemir",
+        "KCHOL": "Koç Holding",
+        "VAKBN": "VakıfBank",
+        "PETKM": "Petkim",
+        "BIMAS": "BİM",
+        "TUPRS": "Tüpraş",
+        "SAHOL": "Sabancı Holding",
+        "HALKB": "Halkbank",
+        "ISCTR": "İş Bankası",
+        "KOZAA": "Koza Altın",
+        "PGSUS": "Pegasus",
+        "ARCLK": "Arçelik",
+        "DOHOL": "Doğan Holding",
+        "GUBRF": "Gübre Fabrikaları"
+    }
+    
+    result = []
+    
+    for symbol in popular_stocks_symbols:
         try:
-            stock_symbol = f"{symbol}.IS"
-            stock = yf.Ticker(stock_symbol)
-            stock_info = stock.history(period="2d")
+            # Hisse verilerini al
+            stock_data = get_stock_data_cached(f"{symbol}.IS", period="2d")
             
-            if not stock_info.empty:
-                company_info = get_company_info(symbol)
-                company_name = company_info.get('name', symbol)
+            if stock_data is not None and not stock_data.empty and len(stock_data) >= 2:
+                current_price = stock_data["Close"].iloc[-1]
+                prev_close = stock_data["Close"].iloc[-2]
+                change_percent = ((current_price - prev_close) / prev_close) * 100
                 
-                current_close = stock_info['Close'].iloc[-1]
-                prev_close = stock_info['Close'].iloc[-2] if len(stock_info) > 1 else current_close
-                
-                change = current_close - prev_close
-                change_percent = (change / prev_close) * 100 if prev_close > 0 else 0
-                
-                # Durum belirleme
-                status = "yükseliş" if change > 0 else ("düşüş" if change < 0 else "nötr")
-                
-                popular_data.append({
+                result.append({
                     "symbol": symbol,
-                    "name": company_name,
-                    "value": round(current_close, 2),
-                    "change": round(change, 2),
-                    "change_percent": round(change_percent, 2),
-                    "status": status
+                    "name": stock_names.get(symbol, symbol),
+                    "value": current_price,
+                    "change_percent": change_percent
+                })
+            else:
+                # Veri alınamazsa varsayılan değerler
+                result.append({
+                    "symbol": symbol,
+                    "name": stock_names.get(symbol, symbol),
+                    "value": 0.0,
+                    "change_percent": 0.0
                 })
         except Exception as e:
-            print(f"{symbol} verisi alınırken hata: {e}")
+            # Hata durumunda varsayılan değerler
+            result.append({
+                "symbol": symbol,
+                "name": stock_names.get(symbol, symbol),
+                "value": 0.0,
+                "change_percent": 0.0
+            })
     
-    return popular_data 
+    return result
 
-@st.cache_data(ttl=3600)  # 1 saat cachele
+@st.cache_data(ttl=600)  # 10 dakika cachele (haberler için)
 def get_stock_news(symbol, limit=5):
     """
     Belirtilen hisse senedi sembolü için haberleri getirir.

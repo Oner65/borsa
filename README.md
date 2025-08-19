@@ -1,138 +1,227 @@
-# 📈 SmartBorsa - Akıllı Borsa Analiz Sistemi
+# Kompakt Borsa Analiz Uygulaması
 
-**Borsa İstanbul (BIST) hisse senetleri için geliştirilmiş AI destekli analiz ve tahmin platformu**
+Bu uygulama BIST 100 borsa analizi, hisse senedi teknik analizi ve makine öğrenmesi tabanlı tahminler sunar.
 
 ## 🚀 Özellikler
 
-- **Makine Öğrenmesi Tabanlı Tahminler**: RandomForest, XGBoost, LightGBM modelleri
-- **Teknik Analiz**: 25+ teknik gösterge ve pattern tanıma
-- **Sentiment Analizi**: Haber ve sosyal medya duyarlılık analizi
-- **Portföy Yönetimi**: Kişiselleştirilmiş portföy takibi ve optimizasyonu
-- **Gerçek Zamanlı Veriler**: Canlı hisse fiyatları ve haberler
-- **AI Powered Insights**: Gemini AI ile akıllı yorum ve öneriler
+- 📊 **BIST100 Genel Bakış**: Piyasa özeti ve performans görünümü
+- 🔍 **Hisse Analizi**: Teknik analiz ve grafik görünümü
+- 🔎 **ML Tarama**: Makine öğrenmesi tabanlı tahmin ve öneriler
 
 ## 🛠️ Teknolojiler
 
-- **Backend**: Python, Streamlit
-- **ML/AI**: scikit-learn, XGBoost, LightGBM, Google Gemini
-- **Data**: yfinance, BeautifulSoup, NewsAPI
-- **Database**: SQLite
-- **Visualization**: Plotly, Matplotlib
+- **Streamlit**: Web uygulaması framework'ü
+- **yFinance**: Finansal veri API'si
+- **Plotly**: İnteraktif grafik kütüphanesi
+- **Scikit-learn, XGBoost, LightGBM**: Makine öğrenmesi modelleri
+- **Transformers**: Duygu analizi için AI modelleri
 
-## 📦 Kurulum
+## 📱 Demo
 
-### Gereksinimler
+Uygulamayı [Streamlit Cloud](https://share.streamlit.io/) üzerinde deneyebilirsiniz.
+
+## ⚡ Hızlı Başlangıç
+
 ```bash
-pip install -r requirements.txt
+# Repository'yi klonlayın
+git clone https://github.com/Oner65/borsa.git
+cd borsa
+
+# Bağımlılıkları yükleyin
+pip install -r requirements_streamlit.txt
+
+# Uygulamayı çalıştırın
+streamlit run compact_borsa_app.py
 ```
-
-### Çalıştırma
-```bash
-streamlit run borsa.py
-```
-
-## 🌐 Deploy Etme
-
-### Streamlit Cloud (Önerilen)
-
-1. **GitHub'a Push Edin:**
-   ```bash
-   # Linux/Mac
-   chmod +x deploy.sh
-   ./deploy.sh
-   
-   # Windows
-   deploy.bat
-   ```
-
-2. **Streamlit Cloud'da Deploy Edin:**
-   - [https://share.streamlit.io/](https://share.streamlit.io/) adresine gidin
-   - GitHub hesabınızla giriş yapın
-   - `veteroner/smartborsa` repository'sini seçin
-   - Main file: `borsa.py`
-   - Deploy'a tıklayın
-
-3. **API Anahtarlarını Ekleyin:**
-   - Streamlit Cloud Dashboard > Secrets
-   ```toml
-   GEMINI_API_KEY = "your_gemini_api_key"
-   NEWS_API_KEY = "your_news_api_key"
-   ```
-
-### Alternatif Deploy Seçenekleri
-
-#### Heroku
-```bash
-# Procfile oluşturun
-echo "web: streamlit run borsa.py --server.port=\$PORT --server.address=0.0.0.0" > Procfile
-
-# Deploy edin
-git push heroku main
-```
-
-#### Railway
-```bash
-railway deploy
-```
-
-#### Render
-- GitHub repository'nizi connect edin
-- Build command: `pip install -r requirements.txt`
-- Start command: `streamlit run borsa.py --server.port=10000 --server.address=0.0.0.0`
-
-## 🔧 Konfigürasyon
-
-### API Anahtarları
-- **Gemini AI**: [Google AI Studio](https://makersuite.google.com/app/apikey)
-- **News API**: [NewsAPI.org](https://newsapi.org/)
-
-### Veritabanı
-- SQLite (varsayılan) veya PostgreSQL
 
 ## 📁 Proje Yapısı
 
 ```
-smartborsa/
-├── borsa.py                 # Ana uygulama
-├── ui/                      # Kullanıcı arayüzü
-├── ai/                      # ML modelleri ve AI
-├── data/                    # Veri yönetimi
-├── analysis/                # Teknik analiz
-├── utils/                   # Yardımcı fonksiyonlar
-├── .streamlit/config.toml   # Streamlit config
-├── requirements.txt         # Python bağımlılıkları
-└── README.md               # Bu dosya
+├── compact_borsa_app.py    # Ana uygulama dosyası
+├── ai/                     # AI ve ML modülleri
+├── analysis/              # Teknik analiz modülleri
+├── data/                  # Veri işleme modülleri
+├── ui/                    # UI bileşenleri
+└── utils/                 # Yardımcı araçlar
 ```
 
-## 🎯 Kullanım
+## 🔗 API'ler
 
-1. **Hisse Analizi**: Teknik göstergeler ve AI yorumları
-2. **ML Tahminleri**: Fiyat ve yön tahminleri
-3. **Portföy Takibi**: Kar/zarar ve performans analizi
-4. **Haber Takibi**: Sentiment analizi ile haber değerlendirme
-5. **Hisse Profilleri**: Kişiselleştirilmiş gösterge analizi
+- **Yahoo Finance**: Gerçek zamanlı hisse senedi verileri
+- **Google News**: Finansal haberler
+- **Transformers**: Duygu analizi
+
+## 📊 Performans
+
+- **Gerçek zamanlı veri**: Anlık piyasa verileri
+- **Hızlı yükleme**: Optimize edilmiş veri işleme
+- **Responsive tasarım**: Mobil uyumlu arayüz
 
 ## 🤝 Katkıda Bulunma
 
-1. Fork edin
-2. Feature branch oluşturun (`git checkout -b feature/AmazingFeature`)
-3. Commit yapın (`git commit -m 'Add some AmazingFeature'`)
-4. Push edin (`git push origin feature/AmazingFeature`)
-5. Pull Request açın
+1. Repository'yi fork edin
+2. Feature branch oluşturun (`git checkout -b feature/amazing-feature`)
+3. Değişikliklerinizi commit edin (`git commit -m 'Add amazing feature'`)
+4. Branch'inizi push edin (`git push origin feature/amazing-feature`)
+5. Pull Request oluşturun
 
 ## 📄 Lisans
 
-Bu proje MIT lisansı altında yayınlanmıştır.
+Bu proje MIT lisansı altında lisanslanmıştır.
 
 ## 📞 İletişim
 
-- GitHub: [@veteroner](https://github.com/veteroner)
-- Repository: [smartborsa](https://github.com/veteroner/smartborsa)
+Proje sahibi: [@Oner65](https://github.com/Oner65)
 
-## ⚠️ Uyarı
+Proje Linki: [https://github.com/Oner65/borsa](https://github.com/Oner65/borsa)
 
-Bu uygulama sadece eğitim ve araştırma amaçlıdır. Finansal kararlarınızı almadan önce profesyonel yatırım danışmanınıza başvurun.
+## Kurulum
 
----
+1. **Gerekli paketleri yükleyin:**
 
-**⭐ Projeyi beğendiyseniz yıldız vermeyi unutmayın!** 
+```bash
+pip install -r requirements.txt
+```
+
+2. **Uygulamayı başlatın:**
+
+```bash
+python borsa.py
+```
+
+veya
+
+```bash
+streamlit run borsa.py
+```
+
+3. **Windows kullanıcıları için:**
+```bash
+borsa_baslat.bat
+```
+
+## Modüller
+
+Uygulama modüler bir yapıda tasarlanmıştır:
+
+- **data**: Veri alma işlevleri ve veritabanı yönetimi
+- **analysis**: Teknik analiz ve gösterge hesaplama
+- **ai**: Yapay zeka ve makine öğrenimi tahmin modelleri
+- **ui**: Kullanıcı arayüzü bileşenleri
+- **utils**: Yardımcı işlevler ve veritabanı utilities
+
+## Kullanım
+
+### 🔍 Hisse Analizi
+1. "Hisse Analizi" sekmesinde istediğiniz hisse senedi kodunu girin
+2. Zaman aralığını seçin (1 hafta - 5 yıl)
+3. "Analiz Et" butonuna tıklayın
+4. Teknik göstergeleri ve sinyalleri inceleyin
+
+### 🚀 Gelişmiş Hisse Tarayıcısı
+1. "Gelişmiş Tarayıcı" sekmesine gidin
+2. Tarama kapsamını seçin (BIST 30/50/100 veya Tüm Hisseler)
+3. Teknik göstergeleri ve filtreleri ayarlayın
+4. "Taramayı Başlat" butonuna tıklayın
+5. Sonuçları inceleyin ve detaylı analizlere geçin
+
+### 📈 ML Tahminleri
+1. "ML Tahminleri" sekmesinde hisse seçin
+2. Model parametrelerini ayarlayın
+3. Tahmin tipini seçin (fiyat/yön)
+4. "Tahmini Başlat" butonuna tıklayın
+
+### 📊 Teknik Tarama
+1. "Teknik Tarama" sekmesinde hisse listesini seçin
+2. Kullanılacak göstergeleri işaretleyin
+3. "Hisseleri Tara" butonuna tıklayın
+4. Sinyal verenleri inceleyin
+
+## Önemli Notlar
+
+- ⚠️ **Uygulama yatırım tavsiyesi niteliği taşımaz**
+- 📊 Tahminler, geçmiş veriler ve teknik analize dayanır
+- 🌐 Bazı özellikler internet bağlantısı gerektirir
+- 🔄 Veriler gerçek zamanlı olarak güncellenir
+- 💾 Analiz sonuçları veritabanında saklanır
+
+## Teknik Gereksinimler
+
+- **Python**: 3.8+
+- **RAM**: Minimum 4GB (8GB önerilir)
+- **Disk**: 1GB boş alan
+- **İnternet**: Veri çekimi için gerekli
+
+## Desteklenen Göstergeler
+
+### Trend Göstergeleri
+- SMA (Simple Moving Average)
+- EMA (Exponential Moving Average)
+- ADX (Average Directional Index)
+- MACD (Moving Average Convergence Divergence)
+
+### Osilatörler
+- RSI (Relative Strength Index)
+- Stochastic Oscillator
+- Williams %R
+- CCI (Commodity Channel Index)
+- Ultimate Oscillator
+- Stochastic RSI
+
+### Volatilite & Diğer
+- Bollinger Bands
+- ATR (Average True Range)
+- Volume Analysis
+- Bull/Bear Power
+- ROC (Rate of Change)
+
+## Sorun Giderme
+
+### Sık Karşılaşılan Hatalar
+
+1. **"Module not found" hataları:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Streamlit başlatma sorunu:**
+   ```bash
+   streamlit --version
+   streamlit run borsa.py
+   ```
+
+3. **Veri çekme hataları:**
+   - İnternet bağlantınızı kontrol edin
+   - Firewall ayarlarını kontrol edin
+   - Birkaç dakika sonra tekrar deneyin
+
+4. **Performans sorunları:**
+   - Tarama kapsamını azaltın (BIST 30 ile başlayın)
+   - Tarayıcı sekmelerini kapatın
+   - Bilgisayarınızı yeniden başlatın
+
+5. **API hataları:**
+   - `config.py` dosyasında API anahtarlarını kontrol edin
+   - Rate limit hatalarında bekleme süresi uygulayın
+
+### İletişim & Destek
+
+Sorularınız için:
+- GitHub Issues bölümünü kullanın
+- Hata raporları için detaylı bilgi sağlayın
+- Özellik istekleri memnuniyetle karşılanır
+
+## Güncelleme Notları
+
+**v2.0 - Gelişmiş Tarama Özelliği**
+- Tüm BIST hisselerini tarama
+- Gelişmiş filtreleme seçenekleri
+- Skorlama sistemi
+- Detaylı analiz görünümü
+- Performans iyileştirmeleri
+
+**v1.0 - İlk Sürüm**
+- Temel teknik analiz
+- ML tahminleri
+- BIST100 genel bakış
+- Haber analizi 

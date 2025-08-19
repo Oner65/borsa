@@ -81,6 +81,128 @@ def render_ml_prediction_tab():
     **Not:** Tahminler yatırım tavsiyesi niteliği taşımaz. Sadece bilgi amaçlıdır.
     """)
 
+    # VERİ KALİTESİ KONTROL PANELİ
+    with st.expander("🔧 Veri Kalitesi Kontrol Paneli", expanded=False):
+        st.markdown("""
+        **Önemli:** ML tarama sonuçlarında hisse fiyatları güncel değilse bu paneli kullanın.
+        """)
+        
+        # İlk satır - Cache ve Model Temizleme
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔄 Cache Temizle", help="Tüm cache'lenmiş verileri temizler", use_container_width=True):
+                st.cache_data.clear()
+                st.success("✅ Cache temizlendi! Sayfa yeniden yüklenecek.")
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Eski Modelleri Temizle", help="7 günden eski modelleri veritabanından siler", use_container_width=True):
+                try:
+                    from data.db_utils import DB_FILE
+                    import sqlite3
+                    from datetime import datetime, timedelta
+                    
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    
+                    # 7 günden eski modelleri bul
+                    seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Önce kaç model silineceğini kontrol et
+                    cursor.execute("SELECT COUNT(*) FROM ml_models WHERE last_update_date < ? OR last_update_date IS NULL", (seven_days_ago,))
+                    old_models_count = cursor.fetchone()[0]
+                    
+                    if old_models_count > 0:
+                        # Eski modelleri sil
+                        cursor.execute("DELETE FROM ml_models WHERE last_update_date < ? OR last_update_date IS NULL", (seven_days_ago,))
+                        conn.commit()
+                        
+                        st.success(f"✅ {old_models_count} eski model temizlendi!")
+                    else:
+                        st.info("ℹ️ Temizlenecek eski model bulunamadı.")
+                    
+                    conn.close()
+                    
+                except Exception as e:
+                    st.error(f"❌ Model temizleme hatası: {str(e)}")
+        
+        with col3:
+            if st.button("📊 Model İstatistikleri", help="Veritabanındaki modelleri listeler", use_container_width=True):
+                try:
+                    from data.db_utils import DB_FILE
+                    import sqlite3
+                    from datetime import datetime, timedelta
+                    
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    
+                    # Toplam model sayısı
+                    cursor.execute("SELECT COUNT(*) FROM ml_models WHERE is_active = 1")
+                    total_models = cursor.fetchone()[0]
+                    
+                    # Eski model sayısı
+                    seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute("SELECT COUNT(*) FROM ml_models WHERE is_active = 1 AND (last_update_date < ? OR last_update_date IS NULL)", (seven_days_ago,))
+                    old_models = cursor.fetchone()[0]
+                    
+                    # Yeni model sayısı
+                    new_models = total_models - old_models
+                    
+                    st.info(f"📊 **Model İstatistikleri:**\n- Toplam: {total_models}\n- Güncel (≤7 gün): {new_models}\n- Eski (>7 gün): {old_models}")
+                    
+                    conn.close()
+                    
+                except Exception as e:
+                    st.error(f"❌ İstatistik hatası: {str(e)}")
+        
+        # İkinci satır - Fiyat Kontrolü
+        st.markdown("---")
+        
+        col4, col5 = st.columns(2)
+        
+        with col4:
+            test_symbol = st.text_input("Test Edilecek Hisse", value="GARAN", placeholder="GARAN")
+        
+        with col5:
+            if st.button("💰 Anlık Fiyat Kontrol", help="Belirtilen hissenin gerçek zamanlı fiyatını kontrol eder", use_container_width=True):
+                if test_symbol:
+                    try:
+                        import yfinance as yf
+                        test_ticker = yf.Ticker(f"{test_symbol}.IS")
+                        
+                        # fast_info ile dene
+                        try:
+                            fast_info = test_ticker.fast_info
+                            if hasattr(fast_info, 'last_price') and fast_info.last_price is not None:
+                                st.success(f"**{test_symbol}** anlık fiyat: **{fast_info.last_price:.2f} TL** (fast_info)")
+                            else:
+                                raise Exception("fast_info başarısız")
+                        except:
+                            # info ile dene
+                            info = test_ticker.info
+                            price_found = False
+                            for key in ['regularMarketPrice', 'currentPrice', 'previousClose']:
+                                if key in info and info[key] is not None:
+                                    st.success(f"**{test_symbol}** anlık fiyat: **{info[key]:.2f} TL** ({key})")
+                                    price_found = True
+                                    break
+                            
+                            if not price_found:
+                                st.error(f"❌ {test_symbol} için anlık fiyat alınamadı")
+                        
+                        # Son kapanış da göster
+                        hist = test_ticker.history(period="1d")
+                        if not hist.empty:
+                            st.info(f"Son kapanış: **{hist['Close'].iloc[-1]:.2f} TL**")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Fiyat kontrolü hatası: {str(e)}")
+                else:
+                    st.warning("⚠️ Lütfen test edilecek hisse kodunu girin")
+    
+    st.divider()
+
     # İşlem günlüğü için expander oluştur (Varsayılan kapalı olsun)
     log_expander = st.expander("İşlem Günlüğü (Detaylar için tıklayın)", expanded=False)
 
@@ -229,7 +351,7 @@ def render_ml_prediction_tab():
     with col2:
         scan_option = st.radio(
             "Tarama Modu:",
-            ["BIST 30", "BIST 50", "BIST 100", "Özel Liste"],
+            ["BIST 30", "BIST 50", "BIST 100", "Tüm BIST", "Özel Liste"],
             index=2,
             horizontal=True,
             key="ml_scan_option"
@@ -346,16 +468,23 @@ def render_ml_prediction_tab():
             
         # Veritabanı Model Ayarları altbölümü
         st.markdown("#### Veritabanı Model Ayarları")
-        st.info("Bu ayarlar, her hisse için özelleştirilmiş modelleri veritabanında saklayarak tarama hızını artırır ve tahmin doğruluğunu iyileştirir.")
+        st.warning("""
+        ⚠️ **VERİ KALİTESİ UYARISI:** Eski modeller güncel olmayan fiyatlarla eğitilmiş olabilir!
+        
+        **Önerilen Ayarlar:**
+        - ❌ Önceden Eğitilmiş Modelleri Kullan: **KAPALI** (Güncel verilerle yeni modeller eğitilsin)
+        - ✅ Tüm Modelleri Yeniden Eğit: **AÇIK** (En güncel fiyatlarla eğitim yapılsın)
+        """)
+        st.info("Otomatik yaş kontrolü: 7 günden eski modeller otomatik olarak yeniden eğitilir.")
         
         db_col1, db_col2 = st.columns(2)
         
         with db_col1:
             use_db_models = st.checkbox(
                 "Önceden Eğitilmiş Modelleri Kullan", 
-                value=True,
+                value=False,  # VERİ KALİTESİ İÇİN VARSAYILAN KAPALI
                 key="ml_use_db_models",
-                help="Veritabanında bulunan önceden eğitilmiş modelleri kullanarak tahmin hızını artırır."
+                help="⚠️ Eski modeller güncel olmayan fiyatlarla eğitilmiş olabilir. Sadece 7 günden yeni modeller kullanılır."
             )
             
             auto_train_missing = st.checkbox(
@@ -368,9 +497,9 @@ def render_ml_prediction_tab():
         with db_col2:
             force_retrain = st.checkbox(
                 "Tüm Modelleri Yeniden Eğit", 
-                value=False,
+                value=True,  # VERİ KALİTESİ İÇİN VARSAYILAN AÇIK
                 key="ml_force_retrain",
-                help="Tüm hisseler için yeni model eğitir ve veritabanını günceller."
+                help="✅ Önerilen: Tüm hisseler için güncel verilerle yeni model eğitir."
             )
             
             if st.checkbox(
@@ -403,7 +532,7 @@ def render_ml_prediction_tab():
                     st.error(f"Veritabanı istatistikleri alınırken hata: {str(e)}")
 
     # --- Yardımcı Fonksiyonlar ---
-    @st.cache_data(ttl=3600) # Veriyi 1 saat cache'le
+    @st.cache_data(ttl=300) # Veriyi 5 dakika cache'le (daha sık güncelleme)
     def get_stock_data_cached(symbol, period="5y", interval="1d", handle_missing=True, cache_key_suffix=""):
         try:
             # Log mesajlarını sadece log_expander varsa göster
@@ -423,9 +552,27 @@ def render_ml_prediction_tab():
                     else:
                         st.success(f"----->>> [{symbol}] yfinance'den veri alındı ({len(data)} satır).")
             
-            # Boş veri kontrolü
+            # Boş veri kontrolü - ARTIK SİMÜLASYON KULLANMA, GERÇEK VERİ AL
             if data.empty:
-                return None
+                # Farklı periyotları dene
+                for backup_period in ["1y", "6mo", "3mo", "1mo", "5d"]:
+                    if backup_period != period:
+                        try:
+                            data = stock.history(period=backup_period, interval=interval)
+                            if not data.empty:
+                                if 'log_expander' in globals() and log_expander is not None:
+                                    with log_expander:
+                                        st.info(f"----->>> [{symbol}] {backup_period} periyodu ile veri alındı.")
+                                break
+                        except:
+                            continue
+                
+                # Hala boşsa None döndür (simülasyon kullanma)
+                if data.empty:
+                    if 'log_expander' in globals() and log_expander is not None:
+                        with log_expander:
+                            st.error(f"----->>> [{symbol}] için hiçbir periyotta veri alınamadı!")
+                    return None
             
             # Tarih damgasını UTC'den arındır
             if data.index.tz is not None:
@@ -460,64 +607,54 @@ def render_ml_prediction_tab():
                     # Kalan NaN'ları medyan ile doldur
                     median_volume = data['Volume'].median()
                     data['Volume'] = data['Volume'].fillna(median_volume)
-                
-                # Yeni zaman serisi oluştur - özellikle dakikalık/saatlik verilerde eksik zaman aralıkları olabilir
-                if interval in ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h']:
-                    # Yeni zaman aralığı oluştur
-                    start_date = data.index.min()
-                    end_date = data.index.max()
-                    
-                    if interval.endswith('m'):
-                        minutes = int(interval[:-1])
-                        freq = f'{minutes}T'  # Pandas için dakika formatı
-                    elif interval.endswith('h'):
-                        hours = int(interval[:-1])
-                        freq = f'{hours}H'  # Pandas için saat formatı
-                    else:
-                        freq = '1D'  # Varsayılan günlük
-                    
-                    # Yeni tarih aralığı oluştur
-                    full_range = pd.date_range(start=start_date, end=end_date, freq=freq)
-                    
-                    # Sadece işlem günleri ve saatleri (Pazartesi-Cuma, 10:00-18:00)
-                    if interval in ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h']:
-                        # İşlem saatleri maskesi
-                        trading_hours = (full_range.hour >= 10) & (full_range.hour < 18)
-                        # İşlem günleri maskesi (0=Pazartesi, 4=Cuma)
-                        trading_days = (full_range.dayofweek >= 0) & (full_range.dayofweek <= 4)
-                        # Her ikisinin de sağlandığı günler
-                        full_range = full_range[trading_hours & trading_days]
-                    
-                    # Mevcut verileri yeni aralığa yeniden dizinle ve eksikleri doldur
-                    if len(full_range) > len(data.index):
-                        data = data.reindex(full_range)
-                        
-                        # Eksikleri doldur
-                        for col in ['Open', 'High', 'Low', 'Close']:
-                            # Önce forward fill
-                            data[col] = data[col].fillna(method='ffill')
-                            # Sonra backward fill
-                            data[col] = data[col].fillna(method='bfill')
-                            # Yine de eksik varsa interpolasyon kullan
-                            data[col] = data[col].interpolate(method='linear')
-                        
-                        # Hacim için son değerle doldur
-                        if 'Volume' in data.columns:
-                            # Eksik işlem saatleri - hacmi 0 olarak doldur
-                            data['Volume'] = data['Volume'].fillna(0)
             
             # GERÇEK ZAMANLI FİYAT KONTROLÜ EKLENDİ - HİSSE KAPANIŞ FİYATINI GÜNCELLE
             try:
-                # En son anlık fiyatı almak için info çağrısı yap
-                info = stock.info
-                if 'regularMarketPrice' in info and info['regularMarketPrice'] is not None:
-                    current_market_price = info['regularMarketPrice']
-                    if 'log_expander' in globals() and log_expander is not None:
-                        with log_expander:
-                            st.success(f"----->>> [{symbol}] için anlık fiyat alındı: {current_market_price}")
-                
-                    # En son veri noktasının Close değerini güncelle
-                    data.loc[data.index[-1], 'Close'] = current_market_price
+                # İlk önce fast_info ile dene (daha hızlı)
+                try:
+                    fast_info = stock.fast_info
+                    if hasattr(fast_info, 'last_price') and fast_info.last_price is not None:
+                        current_market_price = fast_info.last_price
+                        if 'log_expander' in globals() and log_expander is not None:
+                            with log_expander:
+                                st.success(f"----->>> [{symbol}] için anlık fiyat (fast_info): {current_market_price}")
+                        # En son veri noktasının Close değerini güncelle
+                        data.loc[data.index[-1], 'Close'] = current_market_price
+                    else:
+                        raise Exception("fast_info kullanılamadı")
+                except:
+                    # fast_info çalışmazsa info ile dene
+                    info = stock.info
+                    current_price_keys = ['regularMarketPrice', 'currentPrice', 'previousClose', 'ask', 'bid']
+                    current_market_price = None
+                    
+                    for key in current_price_keys:
+                        if key in info and info[key] is not None and info[key] > 0:
+                            current_market_price = info[key]
+                            if 'log_expander' in globals() and log_expander is not None:
+                                with log_expander:
+                                    st.success(f"----->>> [{symbol}] için anlık fiyat ({key}): {current_market_price}")
+                            break
+                    
+                    if current_market_price:
+                        # En son veri noktasının Close değerini güncelle
+                        data.loc[data.index[-1], 'Close'] = current_market_price
+                        # High ve Low değerlerini de kontrol et
+                        last_high = data.loc[data.index[-1], 'High']
+                        last_low = data.loc[data.index[-1], 'Low']
+                        
+                        # Current price, high'tan büyükse high'ı güncelle
+                        if current_market_price > last_high:
+                            data.loc[data.index[-1], 'High'] = current_market_price
+                        
+                        # Current price, low'dan küçükse low'ı güncelle
+                        if current_market_price < last_low:
+                            data.loc[data.index[-1], 'Low'] = current_market_price
+                    else:
+                        if 'log_expander' in globals() and log_expander is not None:
+                            with log_expander:
+                                st.warning(f"----->>> [{symbol}] için anlık fiyat hiçbir key'de bulunamadı")
+                        
             except Exception as price_e:
                 if 'log_expander' in globals() and log_expander is not None:
                     with log_expander:
@@ -1948,6 +2085,19 @@ def render_ml_prediction_tab():
                 if scan_option == "BIST 30": stock_list = bist30
                 elif scan_option == "BIST 50": stock_list = bist30 + bist50_extra
                 elif scan_option == "BIST 100": stock_list = bist30 + bist50_extra + bist100_extra
+                elif scan_option == "Tüm BIST":
+                    # Tüm BIST hisselerini al
+                    try:
+                        from data.stock_data import get_all_bist_stocks
+                        all_bist_stocks = get_all_bist_stocks()
+                        stock_list = [stock + ".IS" if not stock.endswith(".IS") else stock for stock in all_bist_stocks]
+                        with log_expander:
+                            st.info(f"[LOG] Tüm BIST seçeneği: {len(stock_list)} hisse bulundu.")
+                    except Exception as e:
+                        with log_expander:
+                            st.error(f"[HATA] Tüm BIST hisseleri alınamadı: {str(e)}")
+                            st.info("[LOG] Fallback: BIST 100 listesi kullanılıyor.")
+                        stock_list = bist30 + bist50_extra + bist100_extra
 
             if not stock_list:
                 with log_expander:
@@ -2298,33 +2448,67 @@ def render_ml_prediction_tab():
                                 db_model_info = load_ml_model(symbol_clean, model_name)
                                 
                                 if db_model_info:
-                                    # Modeli geri yükle
-                                    model_data = db_model_info['model_data']
-                                    loaded_model = pickle.loads(model_data)
+                                    # MODEL YAŞ KONTROLÜ EKLENDİ
+                                    from datetime import datetime, timedelta
                                     
-                                    # Modeli kaydet
-                                    trained_models[model_name] = loaded_model
+                                    # Son güncelleme tarihini kontrol et
+                                    last_update_str = db_model_info.get('last_update_date', None)
+                                    model_too_old = False
                                     
-                                    # Test seti tahminlerini yap
-                                    test_predictions_proba[model_name] = loaded_model.predict_proba(X_test_scaled)[:, 1]
+                                    if last_update_str:
+                                        try:
+                                            last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S")
+                                            days_old = (datetime.now() - last_update).days
+                                            
+                                            with log_expander:
+                                                st.info(f"-> {stock_symbol}: {model_name} modeli {days_old} gün önce güncellendi.")
+                                            
+                                            # 7 günden eski modelleri yeniden eğit
+                                            if days_old > 7:
+                                                model_too_old = True
+                                                with log_expander:
+                                                    st.warning(f"-> {stock_symbol}: {model_name} modeli çok eski ({days_old} gün), yeniden eğitilecek.")
+                                        except ValueError:
+                                            with log_expander:
+                                                st.warning(f"-> {stock_symbol}: {model_name} modeli tarih formatı bozuk, yeniden eğitilecek.")
+                                            model_too_old = True
+                                    else:
+                                        with log_expander:
+                                            st.warning(f"-> {stock_symbol}: {model_name} modeli tarih bilgisi yok, yeniden eğitilecek.")
+                                        model_too_old = True
                                     
-                                    with log_expander:
-                                        st.success(f"-> {stock_symbol}: {model_name} modeli veritabanından başarıyla yüklendi.")
+                                    # Model çok eski değilse kullan
+                                    if not model_too_old:
+                                        # Modeli geri yükle
+                                        model_data = db_model_info['model_data']
+                                        loaded_model = pickle.loads(model_data)
                                         
-                                        # Metrikleri göster
-                                        if 'metrics' in db_model_info and db_model_info['metrics']:
-                                            metrics = db_model_info['metrics']
-                                            st.info(f"-> {stock_symbol}: {model_name} model metrikleri:")
-                                            st.info(f"   Doğruluk: {metrics.get('accuracy', 'N/A'):.3f}")
-                                            st.info(f"   Kesinlik: {metrics.get('precision', 'N/A'):.3f}")
-                                            st.info(f"   Duyarlılık: {metrics.get('recall', 'N/A'):.3f}")
-                                            st.info(f"   F1 Skoru: {metrics.get('f1', 'N/A'):.3f}")
+                                        # Modeli kaydet
+                                        trained_models[model_name] = loaded_model
                                         
-                                        # Son güncelleme tarihini göster
-                                        if 'last_update_date' in db_model_info:
-                                            st.info(f"-> {stock_symbol}: {model_name} son güncelleme: {db_model_info['last_update_date']}")
-                                    
-                                    db_models_loaded = True
+                                        # Test seti tahminlerini yap
+                                        test_predictions_proba[model_name] = loaded_model.predict_proba(X_test_scaled)[:, 1]
+                                        
+                                        with log_expander:
+                                            st.success(f"-> {stock_symbol}: {model_name} modeli veritabanından başarıyla yüklendi.")
+                                            
+                                            # Metrikleri göster
+                                            if 'metrics' in db_model_info and db_model_info['metrics']:
+                                                metrics = db_model_info['metrics']
+                                                st.info(f"-> {stock_symbol}: {model_name} model metrikleri:")
+                                                st.info(f"   Doğruluk: {metrics.get('accuracy', 'N/A'):.3f}")
+                                                st.info(f"   Kesinlik: {metrics.get('precision', 'N/A'):.3f}")
+                                                st.info(f"   Duyarlılık: {metrics.get('recall', 'N/A'):.3f}")
+                                                st.info(f"   F1 Skoru: {metrics.get('f1', 'N/A'):.3f}")
+                                            
+                                            # Son güncelleme tarihini göster
+                                            if 'last_update_date' in db_model_info:
+                                                st.info(f"-> {stock_symbol}: {model_name} son güncelleme: {db_model_info['last_update_date']}")
+                                        
+                                        db_models_loaded = True
+                                    else:
+                                        with log_expander:
+                                            st.warning(f"-> {stock_symbol}: {model_name} modeli çok eski, yeniden eğitilecek.")
                                 else:
                                     with log_expander:
                                         st.warning(f"-> {stock_symbol}: {model_name} modeli veritabanında bulunamadı, eğitilecek.")
@@ -2337,21 +2521,52 @@ def render_ml_prediction_tab():
                                     with log_expander:
                                         st.info(f"-> {stock_symbol}: Veritabanında {len(db_models)} model bulundu.")
                                     
-                                    # Her modeli yükle
+                                    # Her modeli yükle ve yaş kontrolü yap
                                     for model_type, model_info in db_models.items():
                                         try:
-                                            # Modeli geri yükle
-                                            model_data = model_info['model_data']
-                                            loaded_model = pickle.loads(model_data)
+                                            # MODEL YAŞ KONTROLÜ EKLENDİ
+                                            from datetime import datetime, timedelta
                                             
-                                            # Modeli kaydet
-                                            trained_models[model_type] = loaded_model
+                                            # Son güncelleme tarihini kontrol et
+                                            last_update_str = model_info.get('last_update_date', None)
+                                            model_too_old = False
                                             
-                                            # Test seti tahminlerini yap
-                                            test_predictions_proba[model_type] = loaded_model.predict_proba(X_test_scaled)[:, 1]
+                                            if last_update_str:
+                                                try:
+                                                    last_update = datetime.strptime(last_update_str, "%Y-%m-%d %H:%M:%S")
+                                                    days_old = (datetime.now() - last_update).days
+                                                    
+                                                    with log_expander:
+                                                        st.info(f"-> {stock_symbol}: {model_type} modeli {days_old} gün önce güncellendi.")
+                                                    
+                                                    # 7 günden eski modelleri yeniden eğit
+                                                    if days_old > 7:
+                                                        model_too_old = True
+                                                        with log_expander:
+                                                            st.warning(f"-> {stock_symbol}: {model_type} modeli çok eski ({days_old} gün), atlanıyor.")
+                                                except ValueError:
+                                                    with log_expander:
+                                                        st.warning(f"-> {stock_symbol}: {model_type} modeli tarih formatı bozuk, atlanıyor.")
+                                                    model_too_old = True
+                                            else:
+                                                with log_expander:
+                                                    st.warning(f"-> {stock_symbol}: {model_type} modeli tarih bilgisi yok, atlanıyor.")
+                                                model_too_old = True
                                             
-                                            with log_expander:
-                                                st.success(f"-> {stock_symbol}: {model_type} modeli veritabanından başarıyla yüklendi.")
+                                            # Model çok eski değilse kullan
+                                            if not model_too_old:
+                                                # Modeli geri yükle
+                                                model_data = model_info['model_data']
+                                                loaded_model = pickle.loads(model_data)
+                                                
+                                                # Modeli kaydet
+                                                trained_models[model_type] = loaded_model
+                                                
+                                                # Test seti tahminlerini yap
+                                                test_predictions_proba[model_type] = loaded_model.predict_proba(X_test_scaled)[:, 1]
+                                                
+                                                with log_expander:
+                                                    st.success(f"-> {stock_symbol}: {model_type} modeli veritabanından başarıyla yüklendi.")
                                         except Exception as load_error:
                                             with log_expander:
                                                 st.error(f"-> {stock_symbol}: {model_type} modeli yüklenirken hata: {str(load_error)}")
@@ -2359,9 +2574,11 @@ def render_ml_prediction_tab():
                                     # En az 1 model yüklendiyse başarılı say
                                     if len(trained_models) > 0:
                                         db_models_loaded = True
+                                        with log_expander:
+                                            st.success(f"-> {stock_symbol}: {len(trained_models)} model başarıyla yüklendi.")
                                     else:
                                         with log_expander:
-                                            st.warning(f"-> {stock_symbol}: Hiçbir model yüklenemedi, eğitim yapılacak.")
+                                            st.warning(f"-> {stock_symbol}: Tüm modeller çok eski, yeniden eğitim yapılacak.")
                                 else:
                                     with log_expander:
                                         st.warning(f"-> {stock_symbol}: Veritabanında model bulunamadı, eğitilecek.")
@@ -2693,7 +2910,43 @@ def render_ml_prediction_tab():
                                  st.warning(f"{stock_symbol}: Özellik sayısı ({len(features_to_use)}) ve önem sayısı ({len(importances)}) eşleşmiyor.")
 
                     # 12. Sinyal Oluştur ve Sonuçları Kaydet
-                    current_price = stock_data.iloc[-1]['Close']
+                    # GERÇEK ZAMANLI FİYAT KONTROLÜ - ESKİ CACHE DEĞERLERİNE GÜVENME!
+                    try:
+                        import yfinance as yf
+                        # Anlık fiyatı direkt yfinance'den al (cache'e güvenme)
+                        stock_ticker = yf.Ticker(stock_symbol)
+                        
+                        # İlk önce fast_info ile dene
+                        try:
+                            fast_info = stock_ticker.fast_info
+                            if hasattr(fast_info, 'last_price') and fast_info.last_price is not None:
+                                current_price = fast_info.last_price
+                                with log_expander:
+                                    st.success(f"-> {stock_symbol}: Anlık fiyat (fast_info): {current_price:.2f} TL")
+                            else:
+                                raise Exception("fast_info kullanılamadı")
+                        except:
+                            # fast_info çalışmazsa info ile dene
+                            info = stock_ticker.info
+                            current_price = None
+                            
+                            for key in ['regularMarketPrice', 'currentPrice', 'previousClose']:
+                                if key in info and info[key] is not None and info[key] > 0:
+                                    current_price = info[key]
+                                    with log_expander:
+                                        st.success(f"-> {stock_symbol}: Anlık fiyat ({key}): {current_price:.2f} TL")
+                                    break
+                            
+                            # Hala bulunamadıysa veri setinden al
+                            if current_price is None:
+                                current_price = stock_data.iloc[-1]['Close']
+                                with log_expander:
+                                    st.warning(f"-> {stock_symbol}: Anlık fiyat alınamadı, veri setindeki son değer kullanılıyor: {current_price:.2f} TL")
+                    except Exception as price_e:
+                        # Hata durumunda veri setindeki değeri kullan
+                        current_price = stock_data.iloc[-1]['Close']
+                        with log_expander:
+                            st.warning(f"-> {stock_symbol}: Anlık fiyat hatası ({str(price_e)}), veri setindeki değer kullanılıyor: {current_price:.2f} TL")
                     # Beklenen fiyatı deterministik olarak hesapla
                     # Threshold ve olasılığa göre sabit bir artış hesapla
                     symbol_clean = stock_symbol.replace(".IS", "")
@@ -2801,116 +3054,92 @@ def render_ml_prediction_tab():
                         rising_list = ", ".join([f"**{r['Hisse']}**" for r in rising_stocks])
                         result_container.markdown(f"Yükseliş sinyali veren hisseler: {rising_list}")
 
-                        # Basitleştirilmiş tablo gösterimi - HTML yerine direkt Pandas kullanma
+                        # Basitleştirilmiş tablo gösterimi - Daha güvenilir hale getirildi
                         try:
                             result_df_rising = pd.DataFrame(rising_stocks)
                             
-                            # Gerekli sütunları seçelim ve anlamlı isimler verelim
-                            display_cols = {
-                                "Hisse": "Hisse Kodu",
-                                "Mevcut Fiyat": "Mevcut Fiyat (₺)",
-                                "Tahmin Olasılığı": "Yükseliş Olasılığı (%)"
-                            }
+                            # Gerekli kolonların varlığını kontrol et
+                            required_cols = ["Hisse", "Tahmin Olasılığı"]
+                            missing_cols = [col for col in required_cols if col not in result_df_rising.columns]
                             
-                            # Veriyi hazırla
+                            if missing_cols:
+                                raise ValueError(f"Gerekli kolonlar eksik: {missing_cols}")
+                                
+                            # Veriyi hazırla - Güvenli bir şekilde
                             result_df = result_df_rising.copy()
                             
-                            # Olasılığı yüzde formatına çevir 
-                            result_df["Tahmin Olasılığı"] = (result_df["Tahmin Olasılığı"] * 100).round(2)
+                            # Boş veya NaN değerleri temizle
+                            result_df = result_df.dropna(subset=["Hisse", "Tahmin Olasılığı"])
                             
-                            # GÜNCEL FİYATLARI AL - Veritabanı kayıtlarındaki eski fiyatlar yerine gerçek zamanlı fiyatları kullan
-                            with log_expander:
-                                st.info("Güncel piyasa fiyatları alınıyor...")
+                            if len(result_df) == 0:
+                                raise ValueError("Geçerli veri bulunamadı")
                             
-                            # Her hisse için güncel fiyatları al
-                            guncel_fiyatlar = {}
-                            for hisse in result_df["Hisse"]:
-                                try:
-                                    yahoo_symbol = f"{hisse}.IS"
-                                    stock = yf.Ticker(yahoo_symbol)
-                                    info = stock.info
-                                    if 'regularMarketPrice' in info and info['regularMarketPrice'] is not None:
-                                        guncel_fiyatlar[hisse] = info['regularMarketPrice']
-                                        with log_expander:
-                                            st.success(f"-> {hisse} için güncel fiyat alındı: {guncel_fiyatlar[hisse]}")
-                                except Exception as e:
-                                    with log_expander:
-                                        st.warning(f"-> {hisse} için güncel fiyat alınamadı: {str(e)}")
+                            # Olasılığı yüzde formatına çevir - Güvenli 
+                            result_df["Yükseliş Olasılığı (%)"] = (result_df["Tahmin Olasılığı"] * 100).round(2)
                             
-                            # Beklenen Fiyat ve Tahmini Artış hesaplama - GERÇEKÇİ DEĞERLER 
-                            # Her hisse için gerçek tahmin yapalım
-                            beklenen_fiyatlar = []
-                            tahmini_artislar = []
+                            # Temel gösterim tablosu oluştur
+                            display_data = []
                             
                             for idx, row in result_df.iterrows():
-                                hisse_kodu = row["Hisse"]
-                                # Güncel fiyat varsa kullan, yoksa veritabanındaki fiyatı kullan
-                                mevcut_fiyat = guncel_fiyatlar.get(hisse_kodu, row["Mevcut Fiyat"])
-                                # Güncel fiyat varsa DataFrame'i güncelle
-                                if hisse_kodu in guncel_fiyatlar:
-                                    result_df.at[idx, "Mevcut Fiyat"] = mevcut_fiyat
-                                olasılık = row["Tahmin Olasılığı"] / 100  # 0-1 arasına dönüştür
-                                
-                                # İlgili hissenin prediction_results içindeki tam kaydını bulalım
-                                hisse_tahmin = next((item for item in prediction_results if item["Hisse"] == hisse_kodu), None)
-                                
-                                if hisse_tahmin and "Beklenen Fiyat" in hisse_tahmin and hisse_tahmin["Beklenen Fiyat"] and not pd.isna(hisse_tahmin["Beklenen Fiyat"]):
-                                    # Eğer geçerli bir beklenen fiyat varsa onu kullanalım
-                                    beklenen_fiyat = hisse_tahmin["Beklenen Fiyat"]
-                                else:
-                                    # Deterministik hesaplama - threshold'a göre sabit artış
-                                    # Minimum artış ml_threshold kadar olsun
-                                    min_artis = ml_threshold 
+                                try:
+                                    hisse_kodu = str(row["Hisse"]).strip()
+                                    olasılık = float(row["Yükseliş Olasılığı (%)"])
                                     
-                                    # Hisse sembolüne dayalı deterministik katsayı
-                                    symbol_hash = sum(ord(c) for c in hisse_kodu)
+                                    # Mevcut fiyat kontrolü
+                                    mevcut_fiyat = row.get("Mevcut Fiyat", 0)
+                                    if pd.isna(mevcut_fiyat) or mevcut_fiyat <= 0:
+                                        mevcut_fiyat = 0.0
                                     
-                                    # Olasılığa göre deterministik ölçeklendirme
-                                    # Yüksek olasılık = daha yüksek artış (1.5-3.0 kat ml_threshold)
-                                    artis_katsayisi = 1.5 + (olasılık * 1.5) + ((symbol_hash % 100) / 1000)  # Deterministik faktör
-                                    yuzde_artis = min_artis * artis_katsayisi
+                                    # Model bilgisi kontrolü
+                                    model = row.get("Model", "Bilinmiyor")
+                                    if pd.isna(model):
+                                        model = "Bilinmiyor"
                                     
-                                    # Beklenen fiyatı hesapla
-                                    beklenen_fiyat = mevcut_fiyat * (1 + yuzde_artis)
-                                
-                                # Tahmini artış yüzdesini hesapla
-                                tahmini_artis = ((beklenen_fiyat - mevcut_fiyat) / mevcut_fiyat) * 100
-                                
-                                # Listeye ekle
-                                beklenen_fiyatlar.append(round(beklenen_fiyat, 2))
-                                tahmini_artislar.append(round(tahmini_artis, 2))
+                                    # Sinyal kontrolü
+                                    sinyal = row.get("Sinyal", "Yükseliş")
+                                    if pd.isna(sinyal):
+                                        sinyal = "Yükseliş"
+                                    
+                                    # Basit tahmini artış hesaplama
+                                    beklenen_artis = (ml_threshold * 100) * (olasılık / 100)  # Olasılığa göre ölçeklendir
+                                    beklenen_fiyat = mevcut_fiyat * (1 + beklenen_artis / 100) if mevcut_fiyat > 0 else 0.0
+                                    
+                                    display_data.append({
+                                        "Hisse Kodu": hisse_kodu,
+                                        "Mevcut Fiyat (₺)": round(float(mevcut_fiyat), 2),
+                                        "Beklenen Fiyat (₺)": round(beklenen_fiyat, 2),
+                                        "Tahmini Artış (%)": round(beklenen_artis, 2),
+                                        "Yükseliş Olasılığı (%)": round(olasılık, 2),
+                                        "Sinyal": str(sinyal),
+                                        "Model": str(model)
+                                    })
+                                    
+                                except Exception as row_error:
+                                    with log_expander:
+                                        st.warning(f"Satır işleme hatası: {row_error}")
+                                    continue
                             
-                            # DataFrame'e ekle
-                            result_df["Beklenen Fiyat"] = beklenen_fiyatlar
-                            result_df["Tahmini Artış (%)"] = tahmini_artislar
+                            if not display_data:
+                                raise ValueError("Gösterilecek geçerli veri bulunamadı")
                             
-                            # Display sütunlarına ekle
-                            display_cols["Beklenen Fiyat"] = "Beklenen Fiyat (₺)"
-                            display_cols["Tahmini Artış (%)"] = "Tahmini Artış (%)"
+                            # DataFrame oluştur
+                            final_df = pd.DataFrame(display_data)
                             
-                            # Model bilgisini ekle
-                            display_cols["Model"] = "Kullanılan Model"
-                            
-                            # Sinyali ekle
-                            display_cols["Sinyal"] = "Sinyal"
-                            
-                            # Tabloyu oluştur
-                            # Sadece istediğimiz sütunları seçelim
-                            cols_to_use = list(display_cols.keys())
-                            result_df_display = result_df[cols_to_use].rename(columns=display_cols)
-                            
-                            # Sütun sırasını ayarla - mantıklı bir sıra
+                            # Sütun sırasını ayarla
                             column_order = ["Hisse Kodu", "Mevcut Fiyat (₺)", "Beklenen Fiyat (₺)", 
                                             "Tahmini Artış (%)", "Yükseliş Olasılığı (%)", 
-                                            "Sinyal", "Kullanılan Model"]
-                            result_df_display = result_df_display[column_order]
+                                            "Sinyal", "Model"]
                             
-                            # Tabloya başlık ekleyelim
+                            # Sadece mevcut sütunları kullan
+                            available_cols = [col for col in column_order if col in final_df.columns]
+                            final_df = final_df[available_cols]
+                            
+                            # Tabloya başlık ekle
                             result_container.markdown("### 🔍 Hisse Yükseliş Tahminleri")
                             
-                            # Doğrudan dataframe'i göster - basit ve güvenilir
+                            # Tabloyu göster
                             result_container.dataframe(
-                                result_df_display,
+                                final_df,
                                 use_container_width=True,
                                 hide_index=True,
                             )
@@ -2918,11 +3147,11 @@ def render_ml_prediction_tab():
                             # Tablonun altına açıklama ekle
                             result_container.markdown("""
                             **Tablo Açıklamaları:**
-                            - **Mevcut Fiyat (₺)**: Hissenin şu andaki fiyatı
+                            - **Mevcut Fiyat (₺)**: Hissenin mevcut fiyatı (tahmin zamanındaki)
                             - **Beklenen Fiyat (₺)**: Tahmin edilen dönem sonundaki hedef fiyat
                             - **Tahmini Artış (%)**: Modelin tahmin ettiği yükseliş yüzdesi 
-                            - **Yükseliş Olasılığı (%)**: Modelin belirlenen eşik değerinden daha fazla yükseleceğine olan güven düzeyi
-                            - **Kullanılan Model**: Tahmini yapan makine öğrenmesi modeli
+                            - **Yükseliş Olasılığı (%)**: Modelin belirlenen eşikten fazla yükseleceğine olan güven düzeyi
+                            - **Model**: Tahmini yapan makine öğrenmesi modeli
                             """)
                         
                         except Exception as tablo_hata:

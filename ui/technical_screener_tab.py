@@ -178,11 +178,11 @@ def render_technical_screener_tab():
                     # SMA Kontrol (Kısa dönem SMA uzun dönem SMA'yı yukarı kesiyor - Golden Cross)
                     if "SMA" in gostergeler:
                         try:
-                            if all(col in latest for col in ['SMA_5', 'SMA_20']):
-                                if prev['SMA_5'] < prev['SMA_20'] and latest['SMA_5'] > latest['SMA_20']:
+                            if all(col in latest for col in ['SMA5', 'SMA20']):
+                                if prev['SMA5'] < prev['SMA20'] and latest['SMA5'] > latest['SMA20']:
                                     sinyaller.append("Golden Cross: 5-günlük SMA 20-günlük SMA'yı yukarı kesti")
                                     sinyal_sayisi += 1
-                                elif latest['SMA_5'] > latest['SMA_20'] and latest['SMA_5'] > prev['SMA_5']:
+                                elif latest['SMA5'] > latest['SMA20'] and latest['SMA5'] > prev['SMA5']:
                                     sinyaller.append("Kısa vadeli SMA yükseliş trendinde")
                                     sinyal_sayisi += 0.5
                         except:
@@ -191,11 +191,11 @@ def render_technical_screener_tab():
                     # EMA Kontrol
                     if "EMA" in gostergeler:
                         try:
-                            if all(col in latest for col in ['EMA_5', 'EMA_20']):
-                                if prev['EMA_5'] < prev['EMA_20'] and latest['EMA_5'] > latest['EMA_20']:
+                            if all(col in latest for col in ['EMA5', 'EMA20']):
+                                if prev['EMA5'] < prev['EMA20'] and latest['EMA5'] > latest['EMA20']:
                                     sinyaller.append("EMA Golden Cross: 5-günlük EMA 20-günlük EMA'yı yukarı kesti")
                                     sinyal_sayisi += 1
-                                elif latest['EMA_5'] > latest['EMA_20'] and latest['EMA_5'] > prev['EMA_5']:
+                                elif latest['EMA5'] > latest['EMA20'] and latest['EMA5'] > prev['EMA5']:
                                     sinyaller.append("Kısa vadeli EMA yükseliş trendinde")
                                     sinyal_sayisi += 0.5
                         except:
@@ -204,12 +204,12 @@ def render_technical_screener_tab():
                     # Stokastik Osilatör Kontrol
                     if "Stokastik" in gostergeler:
                         try:
-                            if all(col in latest for col in ['K_Line', 'D_Line']):
-                                if prev['K_Line'] < 20 and latest['K_Line'] > 20 and latest['K_Line'] > latest['D_Line']:
+                            if all(col in latest for col in ['Stoch_%K', 'Stoch_%D']):
+                                if prev['Stoch_%K'] < 20 and latest['Stoch_%K'] > 20 and latest['Stoch_%K'] > latest['Stoch_%D']:
                                     sinyaller.append("Stokastik aşırı satım bölgesinden çıkış sinyali")
                                     sinyal_sayisi += 1
-                                elif prev['K_Line'] < prev['D_Line'] and latest['K_Line'] > latest['D_Line']:
-                                    sinyaller.append("Stokastik K-Line D-Line'ı yukarı kesti")
+                                elif prev['Stoch_%K'] < prev['Stoch_%D'] and latest['Stoch_%K'] > latest['Stoch_%D']:
+                                    sinyaller.append("Stokastik %K, %D'yi yukarı kesti")
                                     sinyal_sayisi += 0.5
                         except:
                             pass
@@ -220,7 +220,7 @@ def render_technical_screener_tab():
                             if 'ADX' in latest:
                                 if latest['ADX'] > 25:
                                     # Güçlü trend varsa yön kontrolü yap
-                                    if 'SMA_5' in latest and 'SMA_20' in latest and latest['SMA_5'] > latest['SMA_20']:
+                                    if 'SMA5' in latest and 'SMA20' in latest and latest['SMA5'] > latest['SMA20']:
                                         sinyaller.append(f"Güçlü yükseliş trendi (ADX: {latest['ADX']:.1f})")
                                         sinyal_sayisi += 0.5
                         except:

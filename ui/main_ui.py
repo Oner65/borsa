@@ -10,9 +10,10 @@ from ui.portfolio_tab import render_portfolio_tab
 from ui.technical_screener_tab import render_technical_screener_tab
 from ui.enhanced_stock_screener_tab import render_enhanced_stock_screener_tab
 from ui.stock_profiler_ui import render_stock_profiler_tab
+from ui.comprehensive_scanner_tab import render_comprehensive_scanner_tab
 from data.db_utils import DB_FILE, get_analysis_results
 from data.stock_data import get_market_summary, get_popular_stocks
-from data.announcements import get_announcements
+from data.announcements import get_announcements, get_all_announcements
 from data.utils import get_analysis_result, save_analysis_result, get_favorites
 import time
 import logging
@@ -193,9 +194,29 @@ def main():
             color: #333 !important;
         }
         
-        /* Sidebar'ı gizle */
+        /* Sidebar stil ayarları */
         [data-testid="stSidebar"] {
-            display: none !important;
+            background-color: #f8f9fa;
+            border-right: 1px solid #e0e0e0;
+        }
+        
+        [data-testid="stSidebar"] > div:first-child {
+            background-color: #f8f9fa;
+            padding-top: 1rem;
+        }
+        
+        /* Sidebar başlık */
+        [data-testid="stSidebar"] h1 {
+            font-size: 1.2rem !important;
+            color: #333;
+            margin-bottom: 1rem;
+        }
+        
+        /* Sidebar selectbox */
+        [data-testid="stSidebar"] .stSelectbox > div > div {
+            background-color: white;
+            border-radius: 5px;
+            border: 1px solid #ddd;
         }
         
         /* Ana içerik alanını genişlet */
@@ -436,43 +457,79 @@ def main():
         
         st.markdown("</div>", unsafe_allow_html=True)
     
+    # Sidebar navigasyon menüsü
+    st.sidebar.title("📊 Borsa Analiz Paneli")
+    
+    # Sayfa seçim menüsü
+    selected_page = st.sidebar.selectbox(
+        "Sayfa Seçin:",
+        [
+            "🔍 Hisse Analizi",
+            "📊 BIST100 Genel Bakış", 
+            "🧠 Yapay Zeka",
+            "📈 ML Tahminleri",
+            "🔎 ML Tarama",
+            "🎯 ML Backtest",
+            "🏷️ Hisse Profilleri",
+            "🔎 Teknik Tarama",
+            "🚀 Gelişmiş Tarayıcı",
+            "🔍 Kapsamlı Tarayıcı",
+            "📝 Analiz Geçmişi",
+            "📰 Haberler",
+            "💼 Portföy"
+        ],
+        key="main_page_selector"
+    )
+    
+    # Sidebar'da ek bilgiler
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔧 Hızlı Erişim")
+    
+    # ML Backtest için hızlı erişim
+    if st.sidebar.button("🎯 Hızlı Backtest", help="ML modelinizi hızlıca test edin"):
+        selected_page = "🎯 ML Backtest"
+        st.rerun()
+    
+    # Favoriler
+    if st.session_state.favorite_stocks:
+        st.sidebar.markdown("### ⭐ Favoriler")
+        for stock in st.session_state.favorite_stocks[:5]:  # İlk 5 favoriyi göster
+            if st.sidebar.button(f"📊 {stock}", key=f"sidebar_{stock}", help=f"{stock} hissesini analiz et"):
+                st.session_state.selected_stock_for_analysis = stock
+                selected_page = "🔍 Hisse Analizi"
+                st.rerun()
+    
     # Ana içerik
     col1, col2 = st.columns([7, 3])
     
     with col1:
-        tabs = st.tabs(["🔍 Hisse Analizi", "📊 BIST100 Genel Bakış", "🧠 Yapay Zeka", "📈 ML Tahminleri", "🔎 ML Tarama", "🎯 Hisse Profilleri", "🔎 Teknik Tarama", "🚀 Gelişmiş Tarayıcı", "📝 Analiz Geçmişi", "📰 Haberler", "💼 Portföy"])
-        
-        with tabs[0]:
+        # Seçilen sayfayı render et
+        if selected_page == "🔍 Hisse Analizi":
             render_stock_tab()
-        
-        with tabs[1]:
+        elif selected_page == "📊 BIST100 Genel Bakış":
             render_bist100_tab()
-        
-        with tabs[2]:
+        elif selected_page == "🧠 Yapay Zeka":
             render_ai_tab()
-        
-        with tabs[3]:
+        elif selected_page == "📈 ML Tahminleri":
             render_ml_prediction_tab()
-        
-        with tabs[4]:
+        elif selected_page == "🔎 ML Tarama":
             render_ml_scan_tab()
-        
-        with tabs[5]:
+        elif selected_page == "🎯 ML Backtest":
+            from ui.ml_backtest_tab import render_ml_backtest_tab
+            render_ml_backtest_tab()
+        elif selected_page == "🏷️ Hisse Profilleri":
             render_stock_profiler_tab()
-        
-        with tabs[6]:
+        elif selected_page == "🔎 Teknik Tarama":
             render_technical_screener_tab()
-        
-        with tabs[7]:
+        elif selected_page == "🚀 Gelişmiş Tarayıcı":
             render_enhanced_stock_screener_tab()
-        
-        with tabs[8]:
+        elif selected_page == "🔍 Kapsamlı Tarayıcı":
+            render_comprehensive_scanner_tab()
+        elif selected_page == "📝 Analiz Geçmişi":
             render_analysis_history_tab()
-        
-        with tabs[9]:
+        elif selected_page == "📰 Haberler":
             render_stock_news_tab()
-        
-        with tabs[10]:
+        elif selected_page == "💼 Portföy":
             render_portfolio_tab()
     
     with col2:
