@@ -363,6 +363,105 @@ def render_simple_stock_tab():
         - **AKBNK** (Akbank)
         """)
 
+# Optimize edilmiş ML analiz fonksiyonları
+@st.cache_data(ttl=600)  # 10 dakika cache
+def batch_analyze_stocks(stock_list, threshold=3.0):
+    """Toplu hisse analizi - Cache'li versiyon"""
+    results = []
+    
+    for symbol in stock_list:
+        try:
+            # Cache'li veri al
+            df = get_stock_data(symbol, "1y")
+            if df.empty:
+                continue
+            
+            # Cache'li göstergeler
+            df = calculate_indicators(df)
+            
+            # Son fiyat ve değişim
+            last_price = df['Close'].iloc[-1]
+            prev_price = df['Close'].iloc[-2]
+            change = ((last_price - prev_price) / prev_price) * 100
+            
+            # Hızlı ML skoru hesaplama
+            score = calculate_ml_score(df)
+            probability = max(0, min(100, score + 50)) / 100
+            
+            # Eşik kontrolü
+            if probability * 100 >= threshold:
+                results.append({
+                    "symbol": symbol,
+                    "name": get_stock_name(symbol),
+                    "last_price": last_price,
+                    "change": change,
+                    "ml_score": probability * 100,
+                    "status": get_status_emoji(probability * 100)
+                })
+        except Exception as e:
+            logger.error(f"Analiz hatası {symbol}: {e}")
+            continue
+    
+    # Skora göre sırala
+    results.sort(key=lambda x: x['ml_score'], reverse=True)
+    return results
+
+@st.cache_data(ttl=1800)  # 30 dakika cache - sık değişmeyen işlemler
+def calculate_ml_score(df):
+    """ML skoru hesapla - Cache'li versiyon"""
+    score = 0
+    
+    # RSI skoru
+    if 'RSI' in df.columns:
+        rsi = df['RSI'].iloc[-1]
+        if rsi < 30:  # Oversold
+            score += 30
+        elif rsi < 50:
+            score += 15
+        elif rsi > 70:  # Overbought
+            score -= 20
+    
+    # Trend skoru
+    if 'SMA20' in df.columns and 'SMA50' in df.columns:
+        sma20 = df['SMA20'].iloc[-1]
+        sma50 = df['SMA50'].iloc[-1]
+        if sma20 > sma50:
+            score += 25
+        else:
+            score -= 15
+    
+    # Momentum skoru
+    if len(df) >= 5:
+        momentum = (df['Close'].iloc[-1] / df['Close'].iloc[-5] - 1) * 100
+        if momentum > 2:
+            score += 20
+        elif momentum < -2:
+            score -= 20
+    
+    return score
+
+def get_stock_name(symbol):
+    """Hisse ismi al"""
+    stock_names = {
+        "THYAO": "Türk Hava Yolları", "GARAN": "Garanti BBVA", "ASELS": "Aselsan",
+        "AKBNK": "Akbank", "EREGL": "Ereğli Demir Çelik", "VAKBN": "VakıfBank",
+        "TUPRS": "Tüpraş", "FROTO": "Ford Otosan", "TCELL": "Turkcell",
+        "SAHOL": "Şişe Cam", "PETKM": "Petkim", "KCHOL": "Koç Holding",
+        "KOZAL": "Koza Altın", "ARCLK": "Arçelik"
+    }
+    return stock_names.get(symbol, symbol)
+
+def get_status_emoji(score):
+    """Durum emoji'si"""
+    if score >= 80:
+        return "🚀"
+    elif score >= 60:
+        return "📈"
+    elif score >= 40:
+        return "📊"
+    else:
+        return "📉"
+
 def render_simple_ml_tab():
     """Basit ML tahmin sekmesi"""
     st.header("🧠 ML Yükseliş Tahmini", divider="rainbow")
@@ -410,92 +509,35 @@ def render_simple_ml_tab():
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        for i, symbol in enumerate(stock_list):
-            status_text.text(f"🔄 Analiz ediliyor: {symbol}")
-            progress_bar.progress((i + 1) / len(stock_list))
-            
-            try:
-                # Veri al
-                df = get_stock_data(symbol, "1y")
-                if df.empty:
-                    continue
-                
-                # Basit ML analizi (gerçek ML yerine basit istatistiksel analiz)
-                df = calculate_indicators(df)
-                
-                # Son fiyat ve değişim
-                last_price = df['Close'].iloc[-1]
-                prev_price = df['Close'].iloc[-2]
-                change = ((last_price - prev_price) / prev_price) * 100
-                
-                # Basit yükseliş olasılığı hesaplama
-                # RSI, trend ve volatilite bazlı
-                score = 0
-                
-                # RSI skoru
-                if 'RSI' in df.columns:
-                    rsi = df['RSI'].iloc[-1]
-                    if rsi < 30:  # Oversold
-                        score += 30
-                    elif rsi < 50:
-                        score += 15
-                    elif rsi > 70:  # Overbought
-                        score -= 20
-                
-                # Trend skoru
-                if 'SMA20' in df.columns and 'SMA50' in df.columns:
-                    sma20 = df['SMA20'].iloc[-1]
-                    sma50 = df['SMA50'].iloc[-1]
-                    if sma20 > sma50:
-                        score += 25
-                    else:
-                        score -= 15
-                
-                # Momentum skoru
-                if len(df) >= 5:
-                    momentum = (df['Close'].iloc[-1] / df['Close'].iloc[-5] - 1) * 100
-                    if momentum > 2:
-                        score += 20
-                    elif momentum < -2:
-                        score -= 20
-                
-                # Skor normalizasyonu (0-100 arası)
-                probability = max(0, min(100, score + 50)) / 100
-                
-                results.append({
-                    "Hisse": symbol,
-                    "Son Fiyat": f"{last_price:.2f} TL",
-                    "Günlük Değişim": f"{change:.2f}%",
-                    "Yükseliş Olasılığı": f"{probability:.1%}",
-                    "Durum": "🟢 Umutvar" if probability > 0.6 else ("🟡 Nötr" if probability > 0.4 else "🔴 Zayıf")
-                })
-                
-            except Exception as e:
-                logger.error(f"{symbol} için hata: {e}")
-                continue
-        
-        progress_bar.empty()
-        status_text.empty()
+        with st.spinner("🧠 ML algoritması çalışıyor..."):
+            # Optimize edilmiş toplu analiz  
+            results = batch_analyze_stocks(stock_list, threshold)
         
         if results:
-            # Sonuçları göster
-            df_results = pd.DataFrame(results)
-            df_results = df_results.sort_values("Yükseliş Olasılığı", ascending=False)
+            st.success(f"✅ {len(results)} fırsat bulundu!")
             
-            st.subheader("📊 ML Tarama Sonuçları")
+            # Sonuçları tablo halinde göster
+            df_results = pd.DataFrame(results)
+            df_results.columns = ['Hisse', 'İsim', 'Son Fiyat', 'Günlük Değişim', 'ML Skoru', 'Durum']
+            
+            # Formatlar
+            df_results['Son Fiyat'] = df_results['Son Fiyat'].apply(lambda x: f"{x:.2f} ₺")
+            df_results['Günlük Değişim'] = df_results['Günlük Değişim'].apply(lambda x: f"{x:+.2f}%")
+            df_results['ML Skoru'] = df_results['ML Skoru'].apply(lambda x: f"{x:.1f}")
+            
             st.dataframe(df_results, use_container_width=True)
             
-            # En umutvar 3 hisse
-            st.subheader("🏆 En Umutvar 3 Hisse")
-            top_3 = df_results.head(3)
-            
-            for i, (_, row) in enumerate(top_3.iterrows(), 1):
-                if float(row['Yükseliş Olasılığı'].strip('%')) > 60:
-                    st.success(f"**{i}. {row['Hisse']}** - {row['Son Fiyat']} - Yükseliş Olasılığı: {row['Yükseliş Olasılığı']}")
-                else:
-                    st.info(f"**{i}. {row['Hisse']}** - {row['Son Fiyat']} - Yükseliş Olasılığı: {row['Yükseliş Olasılığı']}")
+            # En yüksek skorlu hisseleri vurgula
+            if len(results) > 0:
+                best_stock = results[0]
+                st.info(f"🏆 **En Yüksek Skor:** {best_stock['symbol']} - {best_stock['name']} "
+                       f"(ML Skoru: {best_stock['ml_score']:.1f}) {best_stock['status']}")
         else:
-            st.error("❌ Hiç sonuç alınamadı. Lütfen farklı parametreler deneyin.")
+            st.warning(f"😔 Belirlenen eşik (%{threshold}) üzerinde hisse bulunamadı.")
+            st.info("💡 **Öneri:** Eşik değerini düşürmeyi deneyin veya farklı bir zaman dilimi seçin.")
+
+        # Cache bilgisi
+        st.caption("⚡ Veriler cache'den gelir - tekrar tarama daha hızlı!")
     
     # Nasıl çalışır açıklaması
     with st.expander("🔍 Nasıl Çalışıyor?"):
